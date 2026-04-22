@@ -1,0 +1,51 @@
+
+# ===== ESP-IDF build artefacts =====
+**/build/
+**/build_*/
+**/sdkconfig.old
+**/sdkconfig.ci
+**/dependencies.lock
+**/managed_components/
+
+# ===== ESP-IDF / toolchain local state =====
+**/.cache/
+**/compile_commands.json
+**/CMakeCache.txt
+**/CMakeFiles/
+**/cmake_install.cmake
+**/Makefile
+**/*.log
+**/log/
+
+# ===== VS Code =====
+.vscode/settings.json
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch/
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ===== OS junk =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== Editor backups =====
+*.swp
+*.swo
+*~
+.*.sw?
+
+# ===== Secrets =====
+secrets.h
+*_secret.h
+*.pem
+*.key
+*.crt
+.env
+.env.*
