@@ -5,6 +5,6 @@
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=/Users/giuseppestramandinoli/esp-node/dht11-sensor/Matter-Node-Standardisation/esp-dht11/build"
+    "--compile-commands-dir=/Users/giuseppestramandinoli/esp-node/Matter-Node-Standardisation/photosensitive-sensor/build"
   ]
 }
