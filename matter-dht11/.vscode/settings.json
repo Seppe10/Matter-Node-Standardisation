@@ -7,6 +7,6 @@
     "--query-driver=**",
     "--compile-commands-dir=/Users/giuseppestramandinoli/esp-node/Matter-Node-Standardisation/esp-dht11/build"
   ],
-  "idf.port": "/dev/tty.usbmodem5B610393331",
+  "idf.port": "/dev/tty.usbmodem59710825301",
   "idf.flashType": "UART"
 }

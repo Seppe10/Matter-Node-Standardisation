@@ -17,8 +17,8 @@ void app_main(void)
         .bitwidth = ADC_BITWIDTH_DEFAULT,
     };
 
-    // Choose your actual channel (change if needed)
-    adc_channel_t channel = ADC_CHANNEL_4;
+    // GPIO 4 uses Channel 3 on the ESP32-H2
+    adc_channel_t channel = ADC_CHANNEL_3;
 
     adc_oneshot_config_channel(adc_handle, channel, &config);
 

@@ -1,5 +1,8 @@
-# The following lines of boilerplate have to be in your project's
-# CMakeLists in this exact order for cmake to work correctly
+# -----------------------------------------------------------------------------
+# CMake setup
+# Configures the ESP-IDF project, ESP-Matter paths, required components, and compiler options needed to build the Matter-over-Thread application.
+# -----------------------------------------------------------------------------
+
 cmake_minimum_required(VERSION 3.5)
 
 if(NOT DEFINED ENV{ESP_MATTER_PATH})

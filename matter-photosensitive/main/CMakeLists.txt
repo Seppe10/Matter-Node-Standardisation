@@ -1,3 +1,8 @@
+# -----------------------------------------------------------------------------
+# CMake setup
+# Configures the ESP-IDF project, ESP-Matter paths, required components, and compiler options needed to build the Matter-over-Thread application.
+# -----------------------------------------------------------------------------
+
 idf_component_register(
     SRC_DIRS
         "."
