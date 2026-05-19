@@ -1,0 +1,12 @@
+{
+  "idf.pythonInstallPath": "/usr/bin/python3",
+  "idf.currentSetup": "/Users/giuseppestramandinoli/.espressif/v5.4.1/esp-idf",
+  "clangd.path": "/Users/giuseppestramandinoli/.espressif/tools/esp-clang/esp-20.1.1_20250829/esp-clang/bin/clangd",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=**",
+    "--compile-commands-dir=/Users/giuseppestramandinoli/esp-node/Matter-Node-Standardisation/esp-dht11/build"
+  ],
+  "idf.port": "/dev/tty.usbmodem59710825301",
+  "idf.flashType": "UART"
+}
