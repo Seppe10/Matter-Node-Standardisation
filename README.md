@@ -11,7 +11,7 @@ IoT.Edu runs on your own computer. It lets you:
 
 It does **not** show sensor readings, control actuators, update devices over the air, or replace your smart-home app.
 
-> **Status:** prototype. The desktop UI, local API and Matter controller work. An ESP32-H2 running IoT.Edu firmware 1.3.0 has been commissioned onto both Apple Home and the IoT.Edu management fabric. Firmware building and USB flashing currently work on **macOS only**.
+> **Status:** prototype. The desktop UI, local API and Matter controller work on macOS, Windows and Linux. An ESP32-H2 running IoT.Edu firmware 1.3.0 has been commissioned onto both Apple Home and the IoT.Edu management fabric. Firmware building and USB flashing work on **macOS**, are enabled on **Linux** but not yet verified on hardware, and are not yet available on **Windows**.
 
 ---
 
@@ -32,17 +32,18 @@ Everything listens on `127.0.0.1` only. Nothing is exposed to your network excep
 |---|---|---|---|
 | Desktop UI and local API | ✅ | ✅ (x64 Node; also works on ARM64 PCs such as Snapdragon) | ✅ |
 | Matter commissioning and node management | ✅ | ✅ | ✅ |
-| Firmware build (ESP-IDF + esp-matter) | ✅ | ❌ not yet | ❌ not yet |
-| USB flashing | ✅ | ❌ not yet | ❌ not yet |
+| Firmware build (ESP-IDF + esp-matter) | ✅ | ❌ not yet (planned: Docker build backend) | ⚠️ enabled, not yet verified on hardware |
+| USB flashing | ✅ | ❌ not yet (planned: native esptool runner) | ⚠️ enabled, not yet verified on hardware |
+| Serial ports recognised | `/dev/cu.usbmodem*`, `/dev/cu.usbserial*` and similar | `COM1`–`COM999` (detected; flashing not yet available) | `/dev/ttyACM*`, `/dev/ttyUSB*` |
 
-Without the firmware toolchain, the app still runs. Build and flash features show as unavailable.
+Without the firmware toolchain, or on Windows, the app still runs. Build and flash features show as unavailable instead of failing.
 
 ## Requirements
 
 - **Node.js 22.14 or newer** (22 LTS recommended). On Windows ARM64 PCs, install the **x64** build of Node so the `argon2` dependency can use its prebuilt binary.
 - **Git**
 - Optional: a **PostgreSQL** database for the component catalogue and sign-in (see [Database](#database-optional))
-- Optional, macOS only: **ESP-IDF v5.4.1** and **esp-matter** for building and flashing firmware (see [Firmware toolchain](#firmware-toolchain-optional-macos))
+- Optional, macOS or Linux: **ESP-IDF v5.4.1** and **esp-matter** for building and flashing firmware (see [Firmware toolchain](#firmware-toolchain-optional-macos-and-linux))
 
 ## Quick start
 
@@ -114,6 +115,8 @@ npm run typecheck
 npm test
 ```
 
+A few tests use the original developer's firmware archive. They skip themselves on machines that don't have it, so they show as passed. The database test is skipped unless a database is configured.
+
 ## Configuration
 
 All settings go in `apps/local-api/.env`. A value set in your shell overrides the file.
@@ -127,7 +130,7 @@ All settings go in `apps/local-api/.env`. A value set in your shell overrides th
 | `PORT` | No | API port (default `3847`). |
 | `MATTER_MODE` | No | `live` (default) or `mock`. Mock mode runs without real Matter networking, which is useful for trying the UI. |
 | `AUTH_COOKIE_SECURE` | No | Set to `1` to mark session cookies `Secure` when serving over HTTPS. |
-| `IDF_PATH`, `IDF_ACTIVATE`, `ESP_MATTER_PATH` | No | Firmware toolchain locations (macOS). |
+| `IDF_PATH`, `IDF_ACTIVATE`, `ESP_MATTER_PATH` | No | Firmware toolchain locations (macOS and Linux). |
 
 The API always binds to `127.0.0.1` and refuses to start on any other address.
 
@@ -152,7 +155,7 @@ The database never stores compiled firmware, Matter fabric credentials or commis
   ```
 - **First account:** the first account you register becomes the **administrator**. After that, self-registration is closed, and new accounts are created by an administrator.
 
-## Firmware toolchain (optional, macOS)
+## Firmware toolchain (optional, macOS and Linux)
 
 Building and flashing need:
 
@@ -168,6 +171,16 @@ export IDF_ACTIVATE=/path/to/activate_idf_v5.4.1.sh   # only for installs made w
 
 `$IDF_PATH/export.sh` is the standard way to activate ESP-IDF. Installs made with Espressif's EIM tool need `IDF_ACTIVATE` instead.
 
+**On Linux**, your user also needs permission to open serial ports. On Debian and Ubuntu, add yourself to the `dialout` group, then log out and back in:
+
+```bash
+sudo usermod -aG dialout "$USER"
+```
+
+Other distributions may use a different group, such as `uucp` on Arch.
+
+Keep the toolchain and any checkout of this repository on a path **without spaces**. ESP-IDF does not support them.
+
 Build trees (`build/`, `sdkconfig`, `managed_components/`) and logs under `node-data/firmware/out/` are ignored by git.
 
 ## Repository layout
@@ -180,7 +193,8 @@ iotedu/
 ├── packages/
 │   ├── contracts/         Shared types and validation schemas
 │   ├── catalog/           Component catalogue reader
-│   ├── firmware-builder/  ESP-IDF build, Matter OTA image packaging, USB programming
+│   ├── firmware-builder/  ESP-IDF build, Matter OTA image packaging, USB programming,
+│   │                      and platform.ts: the one place that handles OS differences
 │   └── matter-controller/ matter.js controller for the IoT.Edu Management fabric
 ├── node-data/
 │   ├── board-profiles/        Board definitions (ESP32-H2)
@@ -215,9 +229,25 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for the trust boundaries and how cont
 
 ## Known limitations
 
-- Firmware building and USB flashing are macOS-only. Serial-port handling expects macOS device names (`/dev/cu.*`), and the toolchain scripts need bash.
+- **Windows:** firmware building and USB flashing are not available yet. The toolchain scripts need bash, and esp-matter does not support native Windows. COM ports are detected, and the app reports build and flash as unavailable.
+- **Linux:** building and flashing are enabled but have not yet been verified on real hardware. Please open an issue with your results.
+- **Board identification:** detecting which port is an ESP32-H2, as opposed to listing it, currently uses macOS's USB information only.
 - On Windows, the combined `npm run dev` may fail. Start the API and UI separately, as shown above.
 - `hardwareVerified` remains `false`. The modular DHT11 firmware compiles but has not been fully verified on hardware.
+
+## Contributing: platform-specific code
+
+All operating-system differences live in `packages/firmware-builder/src/platform.ts`: serial-port names and listing, process cancellation, and whether the toolchain is supported. Other code calls this module and does not check `process.platform` itself.
+
+Every function there takes the platform as a parameter, so its tests (`platform.test.ts`) cover macOS, Windows and Linux on any machine. When adding OS-specific behaviour, add it there with a test for each platform.
+
+`.gitattributes` keeps shell and Python scripts with LF line endings. Don't override it, or bash will fail on checkouts made from Windows.
+
+## Roadmap
+
+1. ~~Platform module: per-OS serial ports and cancellation; Linux build and flash~~ ✅
+2. Windows flashing: run esptool directly from TypeScript, with the same safety rules as the current script
+3. Building on every OS: a Docker build backend using a pinned esp-matter image
 
 ## Not planned for the initial release
 
