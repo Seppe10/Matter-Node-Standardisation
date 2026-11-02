@@ -32,6 +32,9 @@ export interface CatalogueStorage {
 
 let pool: pg.Pool | null = null;
 
+/** Shown wherever a feature needs the optional PostgreSQL database. */
+export const NO_DATABASE_MESSAGE = "No database is connected. Saving Node Types, firmware recipes and release records needs one. See \"Database (optional)\" in the README.";
+
 export function catalogueEnabled(): boolean {
   return Boolean(process.env.DATABASE_URL);
 }
@@ -569,7 +572,7 @@ export async function addCatalogueRevision(component: ImportComponent): Promise<
 }
 
 export async function saveSelection(componentIds: string[]): Promise<{ recipeId: string; revisions: { id: string; revision: number; versionId: string }[] }> {
-  if (!catalogueEnabled()) throw new CatalogueError("The Neon catalogue is not configured.", 503, "catalogue_unavailable");
+  if (!catalogueEnabled()) throw new CatalogueError(NO_DATABASE_MESSAGE, 503, "catalogue_unavailable");
   const unique = [...new Set(componentIds)];
   if (unique.length === 0) throw new CatalogueError("Select at least one validated component.", 400, "empty_selection");
   const revisions: { id: string; name: string; revision: number; versionId: string; gpio: { name: string; gpio: number | null }[] }[] = [];
@@ -838,7 +841,7 @@ export interface StoredFirmwareRelease {
 }
 
 export async function ensureFirmwareReleases(): Promise<void> {
-  if (!catalogueEnabled()) throw new CatalogueError("The Neon catalogue is not configured.", 503, "catalogue_unavailable");
+  if (!catalogueEnabled()) throw new CatalogueError(NO_DATABASE_MESSAGE, 503, "catalogue_unavailable");
   if (releaseSchemaReady) return;
   await cataloguePool().query(RELEASE_SCHEMA_SQL);
   releaseSchemaReady = true;

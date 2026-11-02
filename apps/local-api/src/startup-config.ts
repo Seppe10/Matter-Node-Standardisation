@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import type { BuildJob } from "@iotedu/contracts";
-import { configuredFirmwareArchive, repositoryPaths } from "@iotedu/contracts/paths";
+import { configuredFirmwareArchive, expandHomePath, repositoryPaths } from "@iotedu/contracts/paths";
 import { FirmwareArtifactError, readFirmwareArtifact } from "./firmware-artifacts.js";
 
 export class DevelopmentStoreError extends Error {
@@ -35,7 +35,7 @@ export function resolveStartupPaths(input: {
   const env = input.env ?? process.env;
   const runtime: StartupRuntime = env.IOTEDU_RUNTIME === "development" ? "development" : "production";
   const archiveDir = configuredFirmwareArchive(env);
-  const configured = env.DATA_DIR?.trim();
+  const configured = expandHomePath(env.DATA_DIR?.trim() ?? "", env);
   if (configured) {
     return {
       runtime,

@@ -45,7 +45,7 @@ export function AccountPage() {
   }, [user?.displayName]);
 
   useEffect(() => {
-    if (user?.role !== "administrator") return;
+    if (user?.role !== "administrator" || user.local) return;
     let live = true;
     void Promise.all([
       api<{ users: ListedUser[] }>("/api/users"),
@@ -63,6 +63,7 @@ export function AccountPage() {
   }, [user?.role]);
 
   if (!user) return null;
+  if (user.local) return <LocalAccount />;
 
   async function saveProfile(event: FormEvent) {
     event.preventDefault();
@@ -341,6 +342,24 @@ function AdminPeople({
             ))}
           </tbody>
         </table>
+      </div>
+    </section>
+  );
+}
+
+function LocalAccount() {
+  return (
+    <section className="stack">
+      <header className="page-head">
+        <div>
+          <h1>Account</h1>
+          <p className="lede">IoT.Edu is running in local mode.</p>
+        </div>
+      </header>
+      <div className="panel stack">
+        <h2>No sign-in needed</h2>
+        <p>No database is connected, so there are no accounts. Anyone using this computer can use IoT.Edu, as with any desktop app. Other computers cannot reach it.</p>
+        <p>To add accounts, connect a PostgreSQL database: set <code>DATABASE_URL</code> in <code>apps/local-api/.env</code>, run <code>npm run db:setup</code>, then restart IoT.Edu. The first account you create becomes the administrator.</p>
       </div>
     </section>
   );

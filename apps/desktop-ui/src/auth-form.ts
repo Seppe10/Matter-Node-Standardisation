@@ -75,6 +75,8 @@ export interface PublicUser {
   role: "administrator" | "user";
   createdAt: string;
   lastLoginAt: string | null;
+  /** True in local mode (no database): a built-in single user, no sign-in. */
+  local?: boolean;
 }
 
 export interface ListedUser extends PublicUser {

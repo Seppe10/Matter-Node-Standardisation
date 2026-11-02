@@ -50,6 +50,25 @@ const SELF_ROUTES = new Set([
 
 export type Access = "public" | "ok" | "unauthenticated" | "forbidden";
 
+/**
+ * Local mode: no database is configured, so there are no accounts.
+ * IoT.Edu is then a single-user desktop app. The person at this computer is the administrator.
+ * The API still binds to 127.0.0.1 only and keeps its Host-header and cross-origin guards.
+ */
+export const LOCAL_USER = Object.freeze({
+  displayName: "Local user",
+  email: "local@this-computer",
+  role: "administrator" as const,
+  createdAt: new Date().toISOString(),
+  lastLoginAt: null,
+  local: true,
+});
+
+export function attachLocalMode(app: FastifyInstance): void {
+  app.get("/api/auth/me", async (_request, reply) => reply.header("cache-control", "no-store").send({ user: LOCAL_USER, mode: "local" }));
+  app.get("/api/auth/registration", async (_request, reply) => reply.header("cache-control", "no-store").send({ open: false, bootstrap: false, mode: "local" }));
+}
+
 export function authorise(method: string, path: string, role: AccountRole | null): Access {
   const key = `${method.toUpperCase()} ${path}`;
   if (PUBLIC_ROUTES.has(key)) return "public";

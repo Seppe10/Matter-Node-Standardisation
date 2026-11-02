@@ -20,7 +20,7 @@ It does **not** show sensor readings, control actuators, update devices over the
 ```text
  Browser (React UI)  ──/api──▶  Local API (Fastify)  ──▶  Matter controller (matter.js)
  http://127.0.0.1:5173          http://127.0.0.1:3847 ──▶  Firmware builder (ESP-IDF, esptool)
-                                                      ──▶  PostgreSQL catalogue (optional)
+                                                      ──▶  PostgreSQL (optional: accounts, saved Node Types)
                                                       ──▶  Local data folder (node-data/data/)
 ```
 
@@ -42,7 +42,7 @@ Without the firmware toolchain, or on Windows, the app still runs. Build and fla
 
 - **Node.js 22.14 or newer** (22 LTS recommended). On Windows ARM64 PCs, install the **x64** build of Node so the `argon2` dependency can use its prebuilt binary.
 - **Git**
-- Optional: a **PostgreSQL** database for the component catalogue and sign-in (see [Database](#database-optional))
+- Optional: a hosted **PostgreSQL** database, for accounts and saved Node Types. Without one, IoT.Edu runs in **local mode** (see [Database](#database-optional)).
 - Optional, macOS or Linux: **ESP-IDF v5.4.1** and **esp-matter** for building and flashing firmware (see [Firmware toolchain](#firmware-toolchain-optional-macos-and-linux))
 
 ## Quick start
@@ -69,7 +69,9 @@ cp apps/local-api/.env.example apps/local-api/.env
 Copy-Item apps\local-api\.env.example apps\local-api\.env
 ```
 
-Open `apps/local-api/.env` and set `IOTEDU_FIRMWARE_ARCHIVE` to a folder that exists, for example `~/iotedu-archive` or `C:\iotedu-archive`. Leave `DATABASE_URL` empty unless you are setting up a database.
+Open `apps/local-api/.env` and set `IOTEDU_FIRMWARE_ARCHIVE` to a folder that exists, for example `~/iotedu-archive` or `C:\iotedu-archive`. You create it in the next step.
+
+Leave `DATABASE_URL` empty. IoT.Edu then runs in **local mode**, with no sign-in. You can [add a database later](#database-optional).
 
 `.env` holds your own settings and secrets. It is ignored by git. Never commit it.
 
@@ -97,7 +99,9 @@ Set-Content node-data\data\application\firmware-library\index.json '{"components
 npm run dev
 ```
 
-Open **http://127.0.0.1:5173**. The API takes up to about 20 seconds to start, so the first page load may show connection errors until it is ready.
+Open **http://127.0.0.1:5173**. The API takes up to about 20 seconds to start, so the first page load may show "Unable to connect" until it is ready. Click **Try again**.
+
+In local mode you go straight to the Overview page, with no sign-in.
 
 On Windows, if `npm run dev` fails, start the two halves in separate terminals:
 
@@ -108,7 +112,16 @@ npm run dev -w @iotedu/desktop-ui
 
 When your firewall asks whether Node may use the network, allow it on **private networks only**. Matter needs this to discover your devices.
 
-### 5. Check everything works
+### 5. Create the management identity
+
+Before you can pair a node, IoT.Edu needs its own Matter identity: the "IoT.Edu Management" fabric.
+
+1. Open **Settings**.
+2. Next to **Controller identity**, click **Create management identity**, and confirm.
+
+This is done once per installation, and needs a network connection. Afterwards, **back up** `node-data/data/application/matter-controller/` somewhere private. If it is lost, every node paired to this identity has to be paired again. IoT.Edu never replaces an identity automatically.
+
+### 6. Check everything works
 
 ```bash
 npm run typecheck
@@ -123,12 +136,12 @@ All settings go in `apps/local-api/.env`. A value set in your shell overrides th
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `IOTEDU_FIRMWARE_ARCHIVE` | Yes | Folder where finished firmware packages are archived. Must exist. |
-| `DATABASE_URL` | No | PostgreSQL connection string. Enables the catalogue and sign-in. Use `sslmode=require` for hosted databases. |
+| `IOTEDU_FIRMWARE_ARCHIVE` | Yes | Folder where finished firmware packages are archived. Must exist. `~/` is allowed. |
+| `DATABASE_URL` | No | PostgreSQL connection string. Empty means local mode. See [Database](#database-optional). |
 | `NEON_BRANCH` | No | Label for the Neon branch in use. Informational. |
-| `DATA_DIR` | No | Use a different local data folder instead of `node-data/data/application/`. |
+| `DATA_DIR` | No | Use a different local data folder instead of `node-data/data/application/`. `~/` is allowed. |
 | `PORT` | No | API port (default `3847`). |
-| `MATTER_MODE` | No | `live` (default) or `mock`. Mock mode runs without real Matter networking, which is useful for trying the UI. |
+| `MATTER_MODE` | No | `live` (default) or `mock`. Mock mode runs without real Matter networking, which is useful for trying the UI. It never creates a management identity. |
 | `AUTH_COOKIE_SECURE` | No | Set to `1` to mark session cookies `Secure` when serving over HTTPS. |
 | `IDF_PATH`, `IDF_ACTIVATE`, `ESP_MATTER_PATH` | No | Firmware toolchain locations (macOS and Linux). |
 
@@ -136,40 +149,101 @@ The API always binds to `127.0.0.1` and refuses to start on any other address.
 
 ## Database (optional)
 
-IoT.Edu uses PostgreSQL for two things:
+IoT.Edu works without a database. A database adds accounts, and lets you save Node Types and firmware release records.
 
-- **Component catalogue:** component identifiers, revisions, source fingerprints and firmware-release records
-- **Accounts:** sign-in and roles
+| | Local mode (default, no database) | With a database |
+|---|---|---|
+| Sign-in | None. The person using this computer is the administrator, as with any desktop app. | Accounts and roles. The first account becomes the administrator. |
+| Nodes, pairing, Matter identity, build and USB history | ✅ stored in `node-data/data/` | ✅ the same, still stored locally |
+| Component library | ✅ read from the repository's files | ✅ stored in the database, starting with the repository's components |
+| Saving Node Types and release records | ❌ needs a database | ✅ |
 
 The database never stores compiled firmware, Matter fabric credentials or commissioning codes. Those stay on your computer.
 
-**Without a database**, sign-in is turned off and the catalogue is unavailable. The app is then usable by anyone on your computer, but not from other machines.
+### Adding a database later
 
-**To set one up**, create a PostgreSQL database (the project was developed against [Neon](https://neon.tech)) and put its connection string in `DATABASE_URL`. Then:
+Nothing needs to be migrated. Local mode stores nothing that the database replaces.
 
-- **Accounts:** the account tables are created automatically on startup.
-- **Catalogue:** apply the catalogue schema once:
-  ```bash
-  psql "$DATABASE_URL" -f apps/local-api/db/001_catalogue.sql
-  psql "$DATABASE_URL" -f apps/local-api/db/002_firmware_releases.sql
-  ```
-- **First account:** the first account you register becomes the **administrator**. After that, self-registration is closed, and new accounts are created by an administrator.
+1. **Create a PostgreSQL database that accepts TLS connections with a trusted certificate.** Hosted services such as [Neon](https://neon.tech) (free tier available), Supabase or Amazon RDS do this. The project was developed against Neon. A default local PostgreSQL install, which has no trusted certificate, is **not supported**: IoT.Edu always verifies the server's certificate.
+2. Put the connection string in `apps/local-api/.env`, for example:
+   ```text
+   DATABASE_URL=postgresql://user:password@your-host/dbname?sslmode=require
+   ```
+3. Set the database up. This creates the tables and adds the starter components that ship in this repository. It is safe to run more than once.
+   ```bash
+   npm run db:setup
+   ```
+4. Restart IoT.Edu (`Ctrl+C`, then `npm run dev`). You now see a sign-in page. Choose **Create account**: the first account becomes the **administrator**. After that, self-registration is closed, and an administrator creates further accounts.
+
+The starter components appear in the Firmware Library as **waiting for validation**. Validating them, and building Node Types from them, needs the [firmware toolchain](#firmware-toolchain-optional-macos-and-linux).
+
+To go back to local mode, empty `DATABASE_URL` and restart. Nothing in the database is deleted.
 
 ## Firmware toolchain (optional, macOS and Linux)
+
+You only need this to build firmware and write it to a board. Everything else works without it, and the app shows building and flashing as unavailable until it is installed.
 
 Building and flashing need:
 
 - **ESP-IDF v5.4.1.** Use exactly this version. Do not use a different minor version unless a later audit supersedes the pin in `toolchain.lock.json`.
-- An **esp-matter** checkout that contains `connectedhomeip/connectedhomeip`.
+- **esp-matter** at the revision pinned in `toolchain.lock.json`.
+
+Together they need several GB of disk space, and the first install takes a while. Keep both, and this repository, on a path **without spaces**: ESP-IDF does not support them.
+
+### 1. Install the prerequisites
+
+Follow Espressif's prerequisite steps for your OS:
+
+- [ESP-IDF prerequisites](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/linux-macos-setup.html): Python, CMake, Ninja and similar. On macOS this includes the Xcode Command Line Tools.
+- [Matter prerequisites](https://github.com/project-chip/connectedhomeip/tree/master/docs/guides/BUILDING.md#prerequisites): extra build packages that esp-matter needs.
+
+### 2. Install ESP-IDF v5.4.1
 
 ```bash
-export IDF_PATH=/path/to/esp-idf-v5.4.1
-export ESP_MATTER_PATH=/path/to/esp-matter
-export IDF_ACTIVATE=/path/to/activate_idf_v5.4.1.sh   # only for installs made with Espressif EIM
-./scripts/baseline_build.sh
+mkdir -p ~/esp && cd ~/esp
+git clone -b v5.4.1 --recursive https://github.com/espressif/esp-idf.git esp-idf-v5.4.1
+cd esp-idf-v5.4.1
+./install.sh esp32h2
+source ./export.sh
 ```
 
-`$IDF_PATH/export.sh` is the standard way to activate ESP-IDF. Installs made with Espressif's EIM tool need `IDF_ACTIVATE` instead.
+### 3. Install esp-matter at the pinned revision
+
+Run this in the same terminal, with ESP-IDF activated by the previous step:
+
+```bash
+cd ~/esp
+git clone https://github.com/espressif/esp-matter.git
+cd esp-matter
+git checkout 2cb668c95de4f24786d20b7cb03c171d6e27b79e   # "observedRevision" in toolchain.lock.json
+git submodule update --init --depth 1
+cd connectedhomeip/connectedhomeip
+./scripts/checkout_submodules.py --platform esp32 linux --shallow    # on macOS: --platform esp32 darwin
+cd ../..
+./install.sh
+```
+
+These steps follow esp-matter's own setup guide for that revision. If one fails, check its `docs/en/developing.rst`.
+
+### 4. Tell IoT.Edu where they are
+
+Add the paths to `apps/local-api/.env`, then restart IoT.Edu:
+
+```text
+IDF_PATH=~/esp/esp-idf-v5.4.1
+ESP_MATTER_PATH=~/esp/esp-matter
+```
+
+IoT.Edu activates ESP-IDF with `$IDF_PATH/export.sh`. If you installed ESP-IDF with Espressif's **EIM** installer instead, also set `IDF_ACTIVATE` to its `activate_idf_v5.4.1.sh` script.
+
+Check it worked: **Settings** should show `IDF_PATH` and `ESP_MATTER_PATH` as configured, and the build mode as `native`.
+
+To build the baseline firmware from a terminal instead:
+
+```bash
+export IDF_PATH=~/esp/esp-idf-v5.4.1 ESP_MATTER_PATH=~/esp/esp-matter
+./scripts/baseline_build.sh
+```
 
 **On Linux**, your user also needs permission to open serial ports. On Debian and Ubuntu, add yourself to the `dialout` group, then log out and back in:
 
@@ -178,8 +252,6 @@ sudo usermod -aG dialout "$USER"
 ```
 
 Other distributions may use a different group, such as `uucp` on Arch.
-
-Keep the toolchain and any checkout of this repository on a path **without spaces**. ESP-IDF does not support them.
 
 Build trees (`build/`, `sdkconfig`, `managed_components/`) and logs under `node-data/firmware/out/` are ignored by git.
 
@@ -221,7 +293,8 @@ It is ignored by git and must never be committed or shared. Anyone with the root
 
 - The API binds to `127.0.0.1` only and rejects requests whose `Host` header is not `127.0.0.1` or `localhost`. This protects against DNS-rebinding attacks.
 - Cross-origin requests are rejected, except from the local UI.
-- Passwords are hashed with Argon2. Sessions use `HttpOnly`, `SameSite=Lax` cookies.
+- **Local mode** (no database) has no sign-in. Anyone using this computer can use IoT.Edu, as with any desktop app. The protections above still apply, so other computers and websites cannot reach it. If several people share the computer and need separate access, [add a database](#database-optional).
+- With a database, passwords are hashed with Argon2, and sessions use `HttpOnly`, `SameSite=Lax` cookies.
 - Toolchain commands go through an allowlisted script. eFuse writes are blocked entirely, and a full flash erase needs explicit confirmation.
 - Pairing codes are redacted from API errors and logs.
 
@@ -233,6 +306,8 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for the trust boundaries and how cont
 - **Linux:** building and flashing are enabled but have not yet been verified on real hardware. Please open an issue with your results.
 - **Board identification:** detecting which port is an ESP32-H2, as opposed to listing it, currently uses macOS's USB information only.
 - On Windows, the combined `npm run dev` may fail. Start the API and UI separately, as shown above.
+- **Database:** a default local PostgreSQL install is not supported, because IoT.Edu always verifies the server's TLS certificate. Use a hosted PostgreSQL service.
+- **Starter catalogue:** the RGB component's source in the starter catalogue is `rgb_led.cpp`. The original catalogue import used a host-application snapshot, which is not in this repository.
 - `hardwareVerified` remains `false`. The modular DHT11 firmware compiles but has not been fully verified on hardware.
 
 ## Contributing: platform-specific code
@@ -246,8 +321,9 @@ Every function there takes the platform as a parameter, so its tests (`platform.
 ## Roadmap
 
 1. ~~Platform module: per-OS serial ports and cancellation; Linux build and flash~~ ✅
-2. Windows flashing: run esptool directly from TypeScript, with the same safety rules as the current script
-3. Building on every OS: a Docker build backend using a pinned esp-matter image
+2. ~~Local mode by default, optional database with `npm run db:setup`~~ ✅
+3. Windows flashing: run esptool directly from TypeScript, with the same safety rules as the current script
+4. Building on every OS: a Docker build backend using a pinned esp-matter image
 
 ## Not planned for the initial release
 

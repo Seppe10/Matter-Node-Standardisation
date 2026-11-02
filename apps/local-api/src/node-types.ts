@@ -5,6 +5,7 @@ import {
   catalogueEnabled,
   cataloguePool,
   listFirmwareReleases,
+  NO_DATABASE_MESSAGE,
 } from "./catalogue-store.js";
 import { storageDecision } from "./catalogue-policy.js";
 
@@ -277,7 +278,7 @@ function legacyPackage(profile: MatchProfile, item: PackageCandidate): boolean {
 let schemaReady = false;
 
 async function ensureNodeTypes(): Promise<void> {
-  if (!catalogueEnabled()) throw new CatalogueError("The Neon catalogue is not configured.", 503, "catalogue_unavailable");
+  if (!catalogueEnabled()) throw new CatalogueError(NO_DATABASE_MESSAGE, 503, "catalogue_unavailable");
   if (!schemaReady) {
     await cataloguePool().query(SCHEMA_SQL);
     schemaReady = true;

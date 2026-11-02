@@ -1,16 +1,19 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { closeCatalogue, importComponents, type ImportComponent } from "./catalogue-store.js";
-import { loadEnvFile } from "./load-env.js";
+import type { ImportComponent } from "./catalogue-store.js";
 
 async function text(file: string): Promise<string> {
   return readFile(file, "utf8");
 }
 
-async function supplied(): Promise<ImportComponent[]> {
-  const root = "/tmp/zip-src";
-  const sharedCmake = await text(path.join(root, "cmp/photosensitive-root.cmake"));
+/**
+ * The starter catalogue: the IoT.Edu core and the three device components that ship in this repository.
+ * Read from the repository so a new database can be seeded on any machine (`npm run db:setup`).
+ * Component ids and metadata match the original catalogue import, which other code relies on.
+ */
+export async function repositoryComponents(repoRoot: string): Promise<ImportComponent[]> {
+  const repo = (relative: string) => path.join(repoRoot, ...relative.split("/"));
+  const sharedCmake = await text(repo("node-data/firmware/template/CMakeLists.txt"));
   const core: ImportComponent = {
     id: "matter-core-iotedu",
     name: "IoT.Edu Matter-over-Thread core",
@@ -45,8 +48,8 @@ async function supplied(): Promise<ImportComponent[]> {
     validationState: "validation_required",
     archiveName: "matter-photosensitive.zip",
     files: [
-      { path: "drivers/photosensitive_sensor.cpp", role: "source", content: await text(path.join(root, "photo/photosensitive_sensor.cpp")) },
-      { path: "drivers/photosensitive_sensor.h", role: "header", content: await text(path.join(root, "photo/photosensitive_sensor.h")) },
+      { path: "drivers/photosensitive_sensor.cpp", role: "source", content: await text(repo("node-data/catalogue/components/photosensitive/drivers/photosensitive_sensor.cpp")) },
+      { path: "drivers/photosensitive_sensor.h", role: "header", content: await text(repo("node-data/catalogue/components/photosensitive/drivers/photosensitive_sensor.h")) },
     ],
     gpio: [{
       name: "Light",
@@ -83,8 +86,8 @@ async function supplied(): Promise<ImportComponent[]> {
     validationState: "validation_required",
     archiveName: "matter-dht11.zip",
     files: [
-      { path: "drivers/dht11.c", role: "source", content: await text(path.join(root, "dht/dht11.c")) },
-      { path: "drivers/dht11.h", role: "header", content: await text(path.join(root, "dht/dht11.h")) },
+      { path: "drivers/dht11.c", role: "source", content: await text(repo("node-data/catalogue/components/dht11/dht11.c")) },
+      { path: "drivers/dht11.h", role: "header", content: await text(repo("node-data/catalogue/components/dht11/dht11.h")) },
     ],
     gpio: [{
       name: "Data",
@@ -117,7 +120,7 @@ async function supplied(): Promise<ImportComponent[]> {
     type: "actuator",
     validationState: "incompatible",
     archiveName: "matter-rgb-led.zip",
-    files: [{ path: "main/app_main.cpp", role: "host_snapshot", content: await text(path.join(root, "rgb/app_main.cpp")) }],
+    files: [{ path: "rgb_led/rgb_led.cpp", role: "host_snapshot", content: await text(repo("node-data/catalogue/components/rgb_led/rgb_led.cpp")) }],
     gpio: [
       { name: "Red", peripheral: "ledc", gpio: 4, constraints: "Fixed PWM channel 0.", description: "Red channel." },
       { name: "Green", peripheral: "ledc", gpio: 10, constraints: "Fixed PWM channel 1.", description: "Green channel." },
@@ -142,9 +145,3 @@ async function supplied(): Promise<ImportComponent[]> {
   };
   return [core, photo, dht, rgb];
 }
-
-const directory = path.dirname(fileURLToPath(import.meta.url));
-await loadEnvFile(path.join(directory, "../.env"));
-const result = await importComponents(await supplied());
-console.log(JSON.stringify(result));
-await closeCatalogue();

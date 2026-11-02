@@ -1746,3 +1746,31 @@ describe("local API", () => {
     }
   });
 });
+
+describe("local mode (no database)", () => {
+  it("serves a built-in local administrator so the UI needs no sign-in", async () => {
+    const { app } = await createApp({});
+    const me = await app.inject({ method: "GET", url: "/api/auth/me", headers: { host: "127.0.0.1:3847" } });
+    expect(me.statusCode).toBe(200);
+    expect(me.json()).toMatchObject({ mode: "local", user: { role: "administrator", local: true } });
+    const registration = await app.inject({ method: "GET", url: "/api/auth/registration", headers: { host: "127.0.0.1:3847" } });
+    expect(registration.json()).toEqual({ open: false, bootstrap: false, mode: "local" });
+    const settings = await app.inject({ method: "GET", url: "/api/settings", headers: { host: "127.0.0.1:3847" } });
+    expect(settings.json()).toMatchObject({ accountMode: "local", controllerIdentityStored: false });
+    await app.close();
+  });
+
+  it("still refuses foreign hosts in local mode", async () => {
+    const { app } = await createApp({});
+    const rebound = await app.inject({ method: "GET", url: "/api/auth/me", headers: { host: "attacker.example:3847" } });
+    expect(rebound.statusCode).toBe(421);
+    await app.close();
+  });
+
+  it("explains that saving Node Types needs a database", async () => {
+    const { app } = await createApp({});
+    const storage = await app.inject({ method: "GET", url: "/api/catalogue/storage", headers: { host: "127.0.0.1:3847" } });
+    expect(storage.json()).toMatchObject({ configured: false, message: expect.stringMatching(/No database is connected/) });
+    await app.close();
+  });
+});

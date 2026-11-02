@@ -45,6 +45,13 @@ export function componentManifestDir(repoRoot: string): string {
   return path.join(repositoryPaths(repoRoot).componentManifestsRoot, "manifests");
 }
 
+/** Expand a leading ~ to the home folder. .env files and Windows shells do not do this themselves. */
+export function expandHomePath(value: string, env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.HOME || env.USERPROFILE || "";
+  if (!home || !/^~(?=$|[\\/])/.test(value)) return value;
+  return path.join(home, value.slice(1).replace(/^[\\/]+/, ""));
+}
+
 export function configuredFirmwareArchive(env: NodeJS.ProcessEnv = process.env): string {
-  return env.IOTEDU_FIRMWARE_ARCHIVE?.trim() ?? "";
+  return expandHomePath(env.IOTEDU_FIRMWARE_ARCHIVE?.trim() ?? "", env);
 }

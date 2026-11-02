@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { repositoryPaths } from "../packages/contracts/src/repository-paths.ts";
+import { expandHomePath, repositoryPaths } from "../packages/contracts/src/repository-paths.ts";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const [command, ...args] = process.argv.slice(2);
@@ -29,7 +29,7 @@ function configuredArchive() {
   return "";
 }
 
-const explicitData = process.env.DATA_DIR?.trim();
+const explicitData = expandHomePath(process.env.DATA_DIR?.trim() ?? "");
 const dataDir = !explicitData
   ? repositoryPaths(repoRoot).applicationDataRoot
   : path.isAbsolute(explicitData)
@@ -40,7 +40,7 @@ const env = {
   IOTEDU_RUNTIME: "development",
   DATA_DIR: dataDir,
 };
-const archive = configuredArchive();
+const archive = expandHomePath(configuredArchive());
 if (archive) env.IOTEDU_FIRMWARE_ARCHIVE = archive;
 
 const child = spawn(command, args, {

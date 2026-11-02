@@ -17,6 +17,7 @@ import {
   recordCompositionBuild,
   saveCompositionRecipe,
   type CatalogueRevision,
+  NO_DATABASE_MESSAGE,
 } from "./catalogue-store.js";
 import { FirmwareArtifactError, firmwareArchiveDir, readFirmwareArtifact } from "./firmware-artifacts.js";
 import type { LocalFirmwareBuildService } from "./services.js";
@@ -63,7 +64,7 @@ export async function startRetainedComposition(
   },
 ): Promise<{ job: BuildJob; reused: boolean }> {
   if (!catalogueEnabled()) {
-    throw new CatalogueError("The Neon catalogue is not configured.", 503, "catalogue_unavailable");
+    throw new CatalogueError(NO_DATABASE_MESSAGE, 503, "catalogue_unavailable");
   }
   if (input.vendorId !== 0xfff1) {
     throw new CatalogueError("A retained composition uses vendor 0xFFF1.", 400, "vendor_mismatch");
@@ -278,7 +279,7 @@ export async function startNodeTypeComposition(
   },
 ): Promise<{ job: BuildJob; reused: boolean }> {
   if (!catalogueEnabled()) {
-    throw new CatalogueError("The Neon catalogue is not configured.", 503, "catalogue_unavailable");
+    throw new CatalogueError(NO_DATABASE_MESSAGE, 503, "catalogue_unavailable");
   }
   const profile = NODE_PROFILES[input.nodeTypeId];
   const [core, device] = await Promise.all([
@@ -429,7 +430,7 @@ export async function startDht11Composition(
   input: { repoRoot: string; dataDir: string; gpio: number; intent?: "reuse" | "new-release"; softwareVersion?: number },
 ): Promise<{ job: BuildJob; reused: boolean }> {
   if (!catalogueEnabled()) {
-    throw new CatalogueError("The Neon catalogue is not configured.", 503, "catalogue_unavailable");
+    throw new CatalogueError(NO_DATABASE_MESSAGE, 503, "catalogue_unavailable");
   }
   const [core, dht] = await Promise.all([
     loadCatalogueRevision(CORE_ID, CORE_REVISION),

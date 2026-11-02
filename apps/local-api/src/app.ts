@@ -29,13 +29,13 @@ import { z, ZodError } from "zod";
 import { startDht11Composition, startNodeTypeComposition } from "./catalogue-compose.js";
 import { classifyFirmwareStorage, FirmwareArtifactError, readFirmwareArtifact } from "./firmware-artifacts.js";
 import { listNodeTypes } from "./node-types.js";
-import { CatalogueError, catalogueEnabled, catalogueStorage, compositionStatus, listFirmwareReleases, listPending, saveSelection } from "./catalogue-store.js";
+import { CatalogueError, catalogueEnabled, catalogueStorage, compositionStatus, listFirmwareReleases, listPending, saveSelection, NO_DATABASE_MESSAGE } from "./catalogue-store.js";
 import { FirmwareLibraryError, FirmwareLibraryService } from "./firmware-library-service.js";
 import { LocalProgrammerService, ProgrammerError, type AppReset, type MonitorRunner, type OccupantLookup, type PortClassifier, type PortLister, type UsbRunner } from "./programmer-service.js";
 import { LocalFirmwareBuildService, type NativeRunner } from "./services.js";
 import { ReachabilityMonitor } from "./reachability.js";
 import { JsonJobRepository, JsonNodeRepository, redact, removeOrphanTemporaryFiles } from "./store.js";
-import { ALLOWED_ORIGINS, attachAuth, resolveAuthStore } from "./auth-http.js";
+import { ALLOWED_ORIGINS, attachAuth, attachLocalMode, resolveAuthStore } from "./auth-http.js";
 import type { AuthStore } from "./auth-store.js";
 
 function publicSession<T extends object>(session: T): Omit<T, "deviceOnboarding" | "savedSerialLog"> {
@@ -202,6 +202,7 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
   });
   const authStore = await resolveAuthStore(paths);
   if (authStore) attachAuth(app, authStore);
+  else attachLocalMode(app);
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof ZodError) {
@@ -360,7 +361,7 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
     }
   });
   app.get("/api/catalogue/storage", async (_request, reply) => {
-    if (!catalogueEnabled()) return { configured: false, message: "The Neon catalogue is not configured." };
+    if (!catalogueEnabled()) return { configured: false, message: NO_DATABASE_MESSAGE };
     try {
       return await catalogueStorage();
     } catch {
@@ -891,6 +892,8 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
     toolchainProbed: true,
     dockerProbed: false,
     controllerIdentityLoaded: controller.identityLoaded,
+    controllerIdentityStored: controller.persisted,
+    accountMode: authStore ? "accounts" : "local",
     fabricLabel: controller.fabricLabel,
     reachabilityIntervalMs: reachability.intervalMs,
     reachabilityFreshnessMs: reachability.freshnessMs(),

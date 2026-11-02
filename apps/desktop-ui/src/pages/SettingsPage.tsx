@@ -12,6 +12,8 @@ interface Settings {
   toolchainProbed: boolean;
   dockerProbed: boolean;
   controllerIdentityLoaded: boolean;
+  controllerIdentityStored?: boolean;
+  accountMode?: "accounts" | "local";
   fabricLabel: string;
   reachabilityIntervalMs?: number;
   reachabilityFreshnessMs?: number;
@@ -25,6 +27,27 @@ export function SettingsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [intervalMs, setIntervalMs] = useState("30000");
   const [storage, setStorage] = useState<string | null>(null);
+  const [creatingIdentity, setCreatingIdentity] = useState(false);
+
+  async function createIdentity() {
+    if (creatingIdentity || !settings) return;
+    const ok = window.confirm("Create the IoT.Edu management identity on this computer? This is done once. Back up node-data/data/application/matter-controller afterwards: if it is lost, nodes paired to this identity must be paired again.");
+    if (!ok) return;
+    setCreatingIdentity(true);
+    setError(null);
+    try {
+      const body = await api<{ identityLoaded: boolean; persisted: boolean; message?: string }>("/api/controller/identity", {
+        method: "POST",
+        body: JSON.stringify({ confirm: true }),
+      });
+      setSettings({ ...settings, controllerIdentityLoaded: body.identityLoaded, controllerIdentityStored: body.persisted });
+      setNotice(body.persisted ? "Management identity created. Back up the matter-controller folder in your data directory." : body.message ?? "The identity was not created.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The identity was not created.");
+    } finally {
+      setCreatingIdentity(false);
+    }
+  }
 
   useEffect(() => {
     Promise.all([
@@ -34,7 +57,7 @@ export function SettingsPage() {
       api<{ configured: boolean; databaseBytes?: number; limitBytes?: number; percent?: number; level?: string; message?: string }>("/api/catalogue/storage")
         .then((body) => setStorage(body.configured && body.databaseBytes != null && body.limitBytes != null
           ? `Catalogue database ${Math.round(body.databaseBytes / 1024 / 1024)} MB of ${Math.round(body.limitBytes / 1024 / 1024)} MB (${body.percent}%, ${body.level}). ${body.message ?? ""}`
-          : body.message ?? "The Neon catalogue is not configured."))
+          : body.message ?? "No database is connected."))
         .catch(() => setStorage("Catalogue storage could not be measured."));
       setSettings(settingsBody);
       setCaps(capabilityBody);
@@ -64,7 +87,16 @@ export function SettingsPage() {
               <tr><th scope="row">Docker</th><td>{settings.dockerProbed ? "Probed" : "Not probed"}</td></tr>
               <tr><th scope="row">Data directory</th><td>{settings.dataDir}</td></tr>
               <tr><th scope="row">Fabric label</th><td>{settings.fabricLabel}</td></tr>
-              <tr><th scope="row">Controller identity</th><td>{settings.controllerIdentityLoaded ? "Loaded" : "Not loaded"}</td></tr>
+              <tr><th scope="row">Accounts</th><td>{settings.accountMode === "local" ? "Local mode: no database, no sign-in" : "Database accounts"}</td></tr>
+              <tr>
+                <th scope="row">Controller identity</th>
+                <td>
+                  {settings.controllerIdentityLoaded ? "Loaded" : settings.controllerIdentityStored ? "Stored but not loaded" : "Not created"}
+                  {settings.controllerIdentityStored === false && (
+                    <> <button type="button" onClick={() => void createIdentity()} disabled={creatingIdentity}>{creatingIdentity ? "Creating…" : "Create management identity"}</button></>
+                  )}
+                </td>
+              </tr>
               <tr><th scope="row">Reachability interval</th><td>{settings.reachabilityIntervalMs ? `${settings.reachabilityIntervalMs / 1000} seconds` : "Not reported"}</td></tr>
               <tr><th scope="row">Freshness window</th><td>{settings.reachabilityFreshnessMs ? `${settings.reachabilityFreshnessMs / 1000} seconds` : "Not reported"}</td></tr>
             </tbody>
