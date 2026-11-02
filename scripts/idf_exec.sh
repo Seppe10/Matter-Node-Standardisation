@@ -10,7 +10,7 @@ source "$ROOT/scripts/idf_env.sh"
 
 valid_port() {
   case "$1" in
-    /dev/cu.usbmodem*|/dev/cu.usbserial*|/dev/cu.wchusbserial*|/dev/cu.SLAB_USBtoUART*)
+    /dev/cu.usbmodem*|/dev/cu.usbserial*|/dev/cu.wchusbserial*|/dev/cu.SLAB_USBtoUART*|/dev/ttyACM[0-9]*|/dev/ttyUSB[0-9]*)
       ;;
     *)
       echo "rejected serial port" >&2

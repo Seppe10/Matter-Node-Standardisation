@@ -110,6 +110,7 @@ describe("development startup paths", () => {
     try {
       await access(path.join(dataDir, "builds.json"));
       if (!archiveDir) throw new Error("unset");
+      await access(archiveDir);
     } catch {
       return;
     }

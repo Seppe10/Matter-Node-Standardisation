@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { toolchainHostSupported } from "./platform.js";
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import type { ComponentManifest, ValidationIssue } from "@iotedu/contracts";
@@ -443,7 +444,7 @@ function programmingDetail(input: {
     : "ESP-IDF v5.4.1 programming tools are available.";
 }
 
-export async function discoverToolchain(env: NodeJS.ProcessEnv = process.env, home = env.HOME ?? env.USERPROFILE ?? ""): Promise<ToolchainInspection> {
+export async function discoverToolchain(env: NodeJS.ProcessEnv = process.env, home = env.HOME ?? env.USERPROFILE ?? "", platform: NodeJS.Platform = process.platform): Promise<ToolchainInspection> {
   const idfFromEnv = env.IDF_PATH && await fileExists(path.join(env.IDF_PATH, "tools", "idf.py")) && await isIdf541(env.IDF_PATH) ? env.IDF_PATH : null;
   const matterFromEnv = env.ESP_MATTER_PATH && await fileExists(path.join(env.ESP_MATTER_PATH, "components")) ? env.ESP_MATTER_PATH : null;
   const activateFromEnv = env.IDF_ACTIVATE && await fileExists(env.IDF_ACTIVATE) ? env.IDF_ACTIVATE : null;
@@ -459,10 +460,11 @@ export async function discoverToolchain(env: NodeJS.ProcessEnv = process.env, ho
   if (idfPath) childEnv.IDF_PATH = idfPath;
   if (espMatterPath) childEnv.ESP_MATTER_PATH = espMatterPath;
   if (activate) childEnv.IDF_ACTIVATE = activate;
-  const programmingAvailable = Boolean(idfPath && activate);
+  const hostSupported = toolchainHostSupported(platform);
+  const programmingAvailable = hostSupported && Boolean(idfPath && activate);
   const nativeAvailable = programmingAvailable && Boolean(espMatterPath);
   const usedDiscovery = programmingAvailable && !(idfFromEnv && activateFromEnv && matterFromEnv);
-  const programmingCode: ProgrammingToolCode = idfPath ? (activate ? "ok" : "toolchain_not_activated") : "toolchain_not_installed";
+  const programmingCode: ProgrammingToolCode = !hostSupported ? "tools_unavailable" : idfPath ? (activate ? "ok" : "toolchain_not_activated") : "toolchain_not_installed";
   return {
     nativeAvailable,
     programmingAvailable,

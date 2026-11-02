@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { stopProcessTree, toolProcessOptions } from "./platform.js";
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
@@ -86,7 +87,7 @@ function runCaptured(
       return;
     }
     const child = spawn(script, args, {
-      detached: true,
+      ...toolProcessOptions(),
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -95,13 +96,7 @@ function runCaptured(
     const onAbort = () => {
       cancelled = true;
       onLog("Cancellation requested. Stopping the toolchain process.");
-      if (child.pid) {
-        try {
-          process.kill(-child.pid, "SIGTERM");
-        } catch {
-          child.kill("SIGTERM");
-        }
-      }
+      stopProcessTree(child);
     };
     signal.addEventListener("abort", onAbort);
     const emit = (chunk: Buffer) => {

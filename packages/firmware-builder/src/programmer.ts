@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import type { BuildJob, ProgramSession, StartupCheck, ValidationIssue } from "@iotedu/contracts";
 import type { PartitionRow } from "./index.js";
+import { filterDevicePortNames, isSerialPortName, listHostSerialPorts, stopProcessTree, toolProcessOptions, type HostPlatform } from "./platform.js";
 
-const PORT_PATTERN = /^\/dev\/cu\.(usbmodem|usbserial|wchusbserial|SLAB_USBtoUART)[A-Za-z0-9._-]{0,64}$/;
 
 const ARTIFACT_BY_SOURCE: Record<string, string> = {
   "bootloader/bootloader.bin": "bootloader.bin",
@@ -157,22 +157,15 @@ export function bootCaptureMessage(monitorLog: string): string | null {
 }
 
 export function isAllowedSerialPort(port: string): boolean {
-  return PORT_PATTERN.test(port) && !port.includes("..");
+  return isSerialPortName(port);
 }
 
-export function filterSerialPortNames(names: string[]): string[] {
-  return names
-    .map((name) => `/dev/${name}`)
-    .filter(isAllowedSerialPort)
-    .sort();
+export function filterSerialPortNames(names: string[], platform: HostPlatform = process.platform): string[] {
+  return filterDevicePortNames(names, platform);
 }
 
 export async function listSerialPorts(): Promise<string[]> {
-  try {
-    return filterSerialPortNames(await readdir("/dev"));
-  } catch {
-    return [];
-  }
+  return listHostSerialPorts();
 }
 
 export function packageProgrammingBlock(job: BuildJob): ValidationIssue | null {
@@ -408,7 +401,7 @@ export function buildWritePlan(input: {
 }): FlashPlan {
   const issues: ValidationIssue[] = [];
   if (!isAllowedSerialPort(input.port)) {
-    issues.push(issue("port_rejected", "Choose a local macOS USB serial device such as /dev/cu.usbmodem."));
+    issues.push(issue("port_rejected", "Choose the USB serial port the board is connected to."));
   }
   if (input.flasher.extra_esptool_args?.chip !== "esp32h2") {
     issues.push(issue("target_mismatch", "The flashing metadata does not name ESP32-H2."));
@@ -695,19 +688,13 @@ function defaultExecutor(script: string, baseEnv: NodeJS.ProcessEnv = process.en
           resolve({ code: 1, text: "", cancelled: true });
           return;
         }
-        const child = spawn(script, args, { detached: true, env: baseEnv, stdio: ["ignore", "pipe", "pipe"] });
+        const child = spawn(script, args, { ...toolProcessOptions(), env: baseEnv, stdio: ["ignore", "pipe", "pipe"] });
         let cancelled = false;
         let text = "";
         const onAbort = () => {
           cancelled = true;
           onLog("note: cancellation requested. Stopping the USB tool.");
-          if (child.pid) {
-            try {
-              process.kill(-child.pid, "SIGTERM");
-            } catch {
-              child.kill("SIGTERM");
-            }
-          }
+          stopProcessTree(child);
         };
         signal.addEventListener("abort", onAbort);
         const emit = (chunk: Buffer) => {

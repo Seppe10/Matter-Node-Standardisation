@@ -210,13 +210,13 @@ describe("flash recovery", () => {
     await mkdir(path.join(home, ".espressif", "tools"), { recursive: true });
     const activate = path.join(home, ".espressif", "tools", "activate_idf_v5.4.1.sh");
     await writeFile(activate, "# activate\n");
-    const discovered = await discoverToolchain({}, home);
+    const discovered = await discoverToolchain({}, home, "darwin");
     expect(discovered.nativeAvailable).toBe(true);
     expect(discovered.source).toBe("discovered");
     expect(discovered.childEnv.IDF_PATH).toBe(idf);
     expect(discovered.childEnv.ESP_MATTER_PATH).toBe(path.join(home, "esp", "esp-matter"));
     expect(discovered.childEnv.IDF_ACTIVATE).toBe(activate);
-    const missing = await discoverToolchain({}, path.join(home, "empty"));
+    const missing = await discoverToolchain({}, path.join(home, "empty"), "darwin");
     expect(missing.nativeAvailable).toBe(false);
     expect(missing.programmingAvailable).toBe(false);
     expect(missing.programmingCode).toBe("toolchain_not_installed");
@@ -228,7 +228,7 @@ describe("flash recovery", () => {
     await mkdir(path.join(programmingOnly, ".espressif", "tools"), { recursive: true });
     const activateOnly = path.join(programmingOnly, ".espressif", "tools", "activate_idf_v5.4.1.sh");
     await writeFile(activateOnly, "# activate\n");
-    const toolsOnly = await discoverToolchain({}, programmingOnly);
+    const toolsOnly = await discoverToolchain({}, programmingOnly, "darwin");
     expect(toolsOnly.programmingAvailable).toBe(true);
     expect(toolsOnly.nativeAvailable).toBe(false);
     expect(toolsOnly.programmingCode).toBe("ok");

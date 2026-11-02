@@ -1,0 +1,3 @@
+# Shell scripts must keep LF endings or bash fails (WSL, Docker, Linux, macOS).
+*.sh text eol=lf
+*.py text eol=lf

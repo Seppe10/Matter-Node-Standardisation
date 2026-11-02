@@ -148,7 +148,7 @@ describe("USB programmer", () => {
     expect(isAllowedSerialPort("/tmp/cu.usbmodem1101")).toBe(false);
     expect(isAllowedSerialPort("/dev/cu.usbmodem1101;reboot")).toBe(false);
     expect(isAllowedSerialPort("/dev/cu.usbmodem1101/../../etc/passwd")).toBe(false);
-    expect(filterSerialPortNames(["cu.usbmodem1101", "cu.Bluetooth-Incoming-Port", "tty.usbmodem1101"])).toEqual([
+    expect(filterSerialPortNames(["cu.usbmodem1101", "cu.Bluetooth-Incoming-Port", "tty.usbmodem1101"], "darwin")).toEqual([
       "/dev/cu.usbmodem1101",
     ]);
   });

@@ -286,7 +286,11 @@ describe("firmware artifact resolver", () => {
     const externalArchive = await configuredArchive();
     let present = Boolean(externalArchive);
     try {
-      if (externalArchive) await access(buildsFile);
+      if (externalArchive) {
+        await access(buildsFile);
+        // Only meaningful on the machine that holds these archived builds.
+        await access(path.join(externalArchive, "87e7ff73-5342-42d9-9fdf-25e7c57dac1f"));
+      }
     } catch {
       present = false;
     }
