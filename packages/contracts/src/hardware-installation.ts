@@ -786,18 +786,25 @@ export function verifyOnboarding(input: {
       discriminatorEvidence: input.discriminatorRedacted ? "redacted" : input.advertisedDiscriminator == null ? "absent" : "live_mismatch",
     };
   }
-  if (input.usesCompiledTestDiscriminator && input.vendorId === 0xfff1 && input.productId != null && input.productId !== DEVELOPMENT_ONBOARDING.productId) {
+  if (input.usesCompiledTestDiscriminator && input.vendorId === 0xfff1 && input.productId != null) {
     return verifyCompiledTestPackage(input, imageIdentity);
   }
   if (!packageMatches) {
+    const compiled = compiledTestOnboarding(input.vendorId, input.productId);
+    const advertisedMatch = compiled != null
+      && input.advertisedDiscriminator === compiled.discriminator
+      && (input.advertisedVendorId == null || input.advertisedVendorId === compiled.vendorId)
+      && (input.advertisedProductId == null || input.advertisedProductId === compiled.productId);
     return {
       ...base,
       status: "not_verified",
-      reason: "Onboarding Payload — Not Verified. This firmware package does not match the 1.3.0 / SoftwareVersion 4 metadata for vendor 0xFFF1 and product 0x8000, so its onboarding payload is not assumed.",
-      discriminatorMatched: null,
+      reason: advertisedMatch
+        ? "The device advertised the development discriminator for this vendor and product, but the firmware did not print a setup passcode and the package configuration did not confirm the shared development provider. No QR is displayed."
+        : "Onboarding Payload — Not Verified. This firmware package does not match the 1.3.0 / SoftwareVersion 4 metadata for vendor 0xFFF1 and product 0x8000, so its onboarding payload is not assumed.",
+      discriminatorMatched: advertisedMatch ? true : null,
       payloadConsistent: null,
       payload: "unknown",
-      discriminatorEvidence: input.discriminatorRedacted ? "redacted" : input.advertisedDiscriminator == null ? "absent" : "absent",
+      discriminatorEvidence: input.discriminatorRedacted ? "redacted" : input.advertisedDiscriminator == null ? "absent" : advertisedMatch ? "live_match" : "absent",
     };
   }
   if (vendorMatched === false || productMatched === false) {
@@ -967,6 +974,9 @@ function verifyCompiledTestPackage(input: {
   };
 }
 
+const NO_STORED_ONBOARDING = "No stored Matter onboarding payload is available for this device. IoT.Edu does not invent a pairing code.";
+export const COMMISSIONED_WITHOUT_ONBOARDING = "This device already has a Matter fabric, and no stored onboarding payload is available. Add IoT.Edu from Pair New Node with a new code from the existing administrator.";
+
 export function onboardingDecision(input: {
   writeCompleted: boolean;
   bootVerified: boolean;
@@ -986,8 +996,52 @@ export function onboardingDecision(input: {
   windowNow?: WindowNow;
   deviceOnboarding?: { qrPayload: string; manualCode: string } | null;
 }): OnboardingDecision {
+  const reported = input.deviceOnboarding?.qrPayload && input.deviceOnboarding.manualCode
+    ? decodeMatterPayload(input.deviceOnboarding.qrPayload, input.deviceOnboarding.manualCode)
+    : null;
+  if (input.deviceOnboarding?.qrPayload && !reported) {
+    return hidden("The stored onboarding code did not decode. It is not displayed.");
+  }
+  if (reported && (
+    (input.vendorId != null && reported.vendorId !== input.vendorId)
+    || (input.productId != null && reported.productId !== input.productId)
+    || !reported.manualCodeMatches
+  )) {
+    return hidden("The device onboarding code does not match this firmware's vendor and product. It is not displayed.");
+  }
+  if (reported && input.deviceOnboarding) {
+    const windowNow = input.windowNow ?? (input.commissioningWindowOpen === true ? "open" : input.commissioningWindowOpen === false ? "closed" : "unknown");
+    const windowWarning = input.commissioningState === "commissioned"
+      ? "Original setup code. This device already has a Matter fabric. Additional pairing may require a new commissioning window from an existing administrator. Showing the stored code does not open a commissioning window."
+      : windowNow === "closed"
+        ? "The commissioning window is closed. Showing the stored code does not open a window."
+        : windowNow === "open"
+          ? null
+          : "The commissioning window is not verified as open. Showing the stored code does not open a window.";
+    const firmwareVerified = input.writeCompleted && input.bootVerified && input.versionVerified;
+    const compiled = compiledTestOnboarding(input.vendorId, input.productId);
+    const matchesCompiled = compiled != null && compiled.qrPayload === input.deviceOnboarding.qrPayload;
+    return {
+      show: true,
+      payload: input.deviceOnboarding.qrPayload,
+      manualCode: input.deviceOnboarding.manualCode,
+      reason: firmwareVerified && matchesCompiled
+        ? "This code matches the compiled development payload for this product. It is the shared development setup code, not a passcode unique to this physical device."
+        : firmwareVerified
+          ? "The Matter server printed this code from the active commissionable-data provider. Preserved NVS is included. This is not the compiled development fallback."
+          : input.commissioningState === "commissioned"
+            ? "Original setup code for the selected device. It does not depend on a firmware build record."
+            : matchesCompiled
+              ? "This is the shared development setup code compiled into this firmware. It is not unique to this physical device. It does not depend on a firmware build record."
+              : "This is the stored Matter onboarding payload for the selected device. It does not depend on a firmware build record.",
+      windowWarning,
+    };
+  }
+  if (input.commissioningState === "commissioned") {
+    return hidden(COMMISSIONED_WITHOUT_ONBOARDING);
+  }
   if (!input.writeCompleted || !input.bootVerified || !input.versionVerified) {
-    return hidden("The onboarding QR is hidden because firmware boot is not verified or the firmware version is not verified for this device.");
+    return hidden(NO_STORED_ONBOARDING);
   }
   const matterStartup = input.matterStartup ?? (input.matterReady ? "started" : "unknown");
   if (matterStartup === "failed") {
@@ -996,45 +1050,12 @@ export function onboardingDecision(input: {
   if (!input.matterReady && matterStartup !== "started") {
     return hidden("Application boot is verified. The Matter server had not reported listening, a fabric, or an onboarding code when this capture ended. OpenThread or an earlier chip log is not that result. No QR is displayed. The compiled development code is not used while NVS may override it.");
   }
-  const reported = input.deviceOnboarding?.qrPayload && input.deviceOnboarding.manualCode
-    ? decodeMatterPayload(input.deviceOnboarding.qrPayload, input.deviceOnboarding.manualCode)
-    : null;
-  if (input.deviceOnboarding?.qrPayload && !reported) {
-    return hidden("The device printed an onboarding code that did not decode. It is not displayed.");
-  }
-  if (reported && (reported.vendorId !== input.vendorId || reported.productId !== input.productId || !reported.manualCodeMatches)) {
-    return hidden("The device onboarding code does not match this firmware's vendor and product. It is not displayed.");
-  }
-  if (input.commissioningState === "commissioned") {
-    return hidden("The first-time QR is hidden because this device already has a Matter fabric. Add IoT.Edu from Pair New Node with a new code from the existing administrator.");
-  }
-  if (reported && input.commissioningState === "uncommissioned") {
-    const windowNow = input.windowNow ?? (input.commissioningWindowOpen === true ? "open" : "unknown");
-    const windowWarning = windowNow === "closed"
-      ? "The commissioning window was closed in the captured log. This page does not open a window."
-      : windowNow === "open"
-        ? null
-        : "The commissioning window is not verified as open now. This page does not open a window.";
-    return {
-      show: true,
-      payload: input.deviceOnboarding?.qrPayload ?? null,
-      manualCode: input.deviceOnboarding?.manualCode ?? null,
-      reason: compiledTestOnboarding(input.vendorId, input.productId)?.qrPayload === input.deviceOnboarding?.qrPayload
-        ? "The Matter server printed this code. It matches the compiled development payload for this product, so preserved NVS did not substitute a different passcode or discriminator."
-        : "The Matter server printed this code from the active commissionable-data provider. Preserved NVS is included. This is not the compiled development fallback.",
-      windowWarning,
-    };
-  }
-  if (input.nvsPreserved && !reported) {
+  if (input.nvsPreserved && !reported && input.onboardingStatus !== "verified") {
     const version = input.softwareVersionString ?? "This firmware";
-    return hidden(`${version} did not print the active setup code. Preserved NVS is read before the compiled development values, so those values are not displayed. The USB port on this image is a log console rather than a Matter command console.`);
+    return hidden(input.onboardingReason || `${version} did not print the active setup code. Preserved NVS is read before the compiled development values, so those values are not displayed. The USB port on this image is a log console rather than a Matter command console.`);
   }
   const compiled = compiledTestOnboarding(input.vendorId, input.productId);
-  const developmentIdentity = input.softwareVersion === DEVELOPMENT_ONBOARDING.softwareVersion
-    && input.softwareVersionString === DEVELOPMENT_ONBOARDING.softwareVersionString
-    && input.productId === DEVELOPMENT_ONBOARDING.productId;
-  const identityMatches = compiled != null && input.vendorId === compiled.vendorId
-    && (input.productId === DEVELOPMENT_ONBOARDING.productId ? developmentIdentity : true);
+  const identityMatches = compiled != null && input.vendorId === compiled.vendorId;
   if (!identityMatches || !compiled) {
     return hidden("The onboarding QR is hidden because this verified firmware has no compiled test payload for its vendor and product.");
   }
@@ -1059,7 +1080,7 @@ export function onboardingDecision(input: {
     manualCode: compiled.manualCode,
     reason: input.onboardingStatus === "image_verified"
       ? IMAGE_VERIFIED_LABEL
-      : "The firmware, package metadata, and advertised discriminator match. The QR is the verified first-time payload.",
+      : "The firmware package uses the shared development setup code, and the device advertised its discriminator. This passcode is not unique to the physical device.",
     windowWarning,
   };
 }

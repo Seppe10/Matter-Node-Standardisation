@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { encodeBootHeader, encodePartitionTable } from "@iotedu/firmware-builder/recovery";
 import type { FlashIo } from "@iotedu/firmware-builder/programmer";
 import type { BuildJob } from "@iotedu/contracts";
+import { componentManifestDir } from "@iotedu/contracts/paths";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApp, readBoardProfile } from "./app.js";
 
@@ -179,7 +180,7 @@ async function start(io: FlashIo, nativeAvailable = true) {
   const app = await buildApp({
     dataDir,
     repoRoot,
-    catalogDir: path.join(repoRoot, "catalog/manifests"),
+    catalogDir: componentManifestDir(repoRoot),
     profile: await readBoardProfile(repoRoot),
     nativeAvailable,
     listPorts: async () => [port, consolePort],
@@ -415,7 +416,7 @@ describe("full flash erase API", () => {
     const reopened = await buildApp({
       dataDir,
       repoRoot,
-      catalogDir: path.join(repoRoot, "catalog/manifests"),
+      catalogDir: componentManifestDir(repoRoot),
       profile: await readBoardProfile(repoRoot),
       nativeAvailable: true,
       listPorts: async () => [port],

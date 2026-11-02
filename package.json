@@ -11,7 +11,7 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently -n api,ui -c blue,green \"npm run dev -w @iotedu/local-api\" \"npm run dev -w @iotedu/desktop-ui\"",
+    "dev": "node --experimental-strip-types scripts/dev-runtime.mjs concurrently -n api,ui -c blue,green \"npm run dev -w @iotedu/local-api\" \"npm run dev -w @iotedu/desktop-ui\"",
     "test": "npm run test -w @iotedu/contracts && npm run test -w @iotedu/catalog && npm run test -w @iotedu/firmware-builder && npm run test -w @iotedu/matter-controller && npm run test -w @iotedu/local-api && npm run test -w @iotedu/desktop-ui",
     "typecheck": "npm run typecheck -w @iotedu/contracts && npm run typecheck -w @iotedu/catalog && npm run typecheck -w @iotedu/firmware-builder && npm run typecheck -w @iotedu/matter-controller && npm run typecheck -w @iotedu/local-api && npm run typecheck -w @iotedu/desktop-ui",
     "build": "npm run build -w @iotedu/desktop-ui"

@@ -14,8 +14,6 @@ import {
 import { IDENTITY_FILE, protectStorage } from "./identity.js";
 import { redactSecrets } from "./redact.js";
 import type { ControllerRuntimeInfo, ManagementTransport, ObservedNode, SharingWindow } from "./session.js";
-import { attachOtaProvider, type AnnouncedPeer, type AttachedOta } from "./ota-provider.js";
-import { interpretOtaRequestor } from "./ota-requestor.js";
 import { interpretApplicationModel, partsFrom, DESCRIPTOR_CLUSTER_ID, DEVICE_TYPE_LIST_ATTRIBUTE_ID, PARTS_LIST_ATTRIBUTE_ID, SERVER_LIST_ATTRIBUTE_ID } from "./application-model.js";
 
 const MATTER_JS_VERSION = "0.18.0";
@@ -115,15 +113,8 @@ export async function openMatterTransport(storageDir: string, options: { create:
   }) as unknown as MatterControllerNode;
   await node.start();
   await protectStorage(directory);
-  let ota: AttachedOta | null = null;
-  let otaError: string | null = null;
-  try {
-    ota = await attachOtaProvider(node as unknown as Parameters<typeof attachOtaProvider>[0]);
-  } catch (error) {
-    otaError = safeMessage(error);
-  }
   const read = Read as unknown as ReadApi;
-  const transport = new MatterJsTransport(node, FabricAuthority, CertificateAuthority, read, Seconds, directory, ota, otaError);
+  const transport = new MatterJsTransport(node, FabricAuthority, CertificateAuthority, read, Seconds, directory);
   active = { directory, node, transport };
   return transport;
 }
@@ -142,8 +133,6 @@ class MatterJsTransport implements ManagementTransport {
     private readonly read: ReadApi,
     private readonly seconds: (value: number) => unknown,
     private readonly directory: string,
-    private readonly ota: AttachedOta | null,
-    private readonly otaError: string | null,
   ) {}
 
   async ensureStarted(_options: { create: boolean }): Promise<ControllerRuntimeInfo> {
@@ -265,13 +254,15 @@ class MatterJsTransport implements ManagementTransport {
     const peer = this.find(matterNodeId);
     try {
       await withTimeout(peer.start(), 20_000, "CASE session");
-      const window = await withTimeout(peer.openEnhancedCommissioningWindow(this.seconds(180)), 20_000, "Commissioning window");
+      const durationSeconds = 180;
+      const window = await withTimeout(peer.openEnhancedCommissioningWindow(this.seconds(durationSeconds)), 20_000, "Commissioning window");
       if (!window.manualPairingCode && !window.qrPairingCode) {
         throw new MatterOperationError("connection_failed", "The device did not return a commissioning code.");
       }
       return {
         manualPairingCode: window.manualPairingCode ?? "",
         qrPairingCode: window.qrPairingCode ?? "",
+        durationSeconds,
       };
     } catch (error) {
       if (error instanceof MatterOperationError) throw error;
@@ -282,29 +273,6 @@ class MatterJsTransport implements ManagementTransport {
   async close(): Promise<void> {
     await this.node.close();
     if (active?.node === this.node) active = null;
-  }
-
-  async readOtaRequestor(matterNodeId: string) {
-    const peer = this.find(matterNodeId);
-    await withTimeout(peer.start(), 45_000, "CASE session");
-    const requestorPaths = [0x0000, 0x0001, 0x0002, 0x0003, 0xfff9].map((attributeId) => ({
-      endpointId: 0,
-      clusterId: 0x002a,
-      attributeId,
-    }));
-    const reports = await this.collectReports(peer, requestorPaths, matterNodeId, 1, 0);
-    let aclFailed = false;
-    try {
-      reports.push(...await this.collectReports(peer, [{ endpointId: 0, clusterId: 0x001f, attributeId: 0x0000 }], matterNodeId, 1, 0));
-    } catch {
-      aclFailed = true;
-    }
-    return interpretOtaRequestor({
-      matterNodeId,
-      reports,
-      controllerNodeId: this.controllerOperationalNodeId(),
-      aclFailed,
-    });
   }
 
   async readApplicationModel(matterNodeId: string) {
@@ -322,45 +290,6 @@ class MatterJsTransport implements ManagementTransport {
     ]);
     const reports = await this.collectReports(peer, paths, matterNodeId, 1, 0);
     return interpretApplicationModel([...new Set(parts)], reports);
-  }
-
-  private controllerOperationalNodeId(): string | null {
-    const authority = this.node.env.get(this.fabricAuthority) as { fabrics?: Array<{ nodeId?: unknown }> };
-    const text = idText(authority.fabrics?.[0]?.nodeId);
-    return text && /^\d+$/.test(text) ? text : null;
-  }
-
-  async otaProviderStatus() {
-    if (!this.ota) {
-      return { running: false, endpointNumber: null, fabricScoped: false, ledgerOffline: true };
-    }
-    return this.ota.status();
-  }
-
-  async beginOta(input: { matterNodeId: string; image: Uint8Array; vendorId: number; productId: number; softwareVersion: number }) {
-    if (!this.ota) {
-      throw new MatterOperationError("connection_failed", this.otaError ?? "The OTA Provider endpoint is not installed.");
-    }
-    const peer = this.find(input.matterNodeId);
-    await this.ota.begin(input, peer as unknown as AnnouncedPeer, this.read(this.read.Attribute({ endpoint: 0 })));
-  }
-
-  subscribeOta(listener: (event: import("@iotedu/contracts").OtaProviderEvent) => void) {
-    return this.ota?.subscribe(listener) ?? (() => undefined);
-  }
-
-  async listStoredImages() {
-    return this.ota?.listImages() ?? [];
-  }
-
-  async storeLocalImage(image: Uint8Array, softwareVersion: number) {
-    if (!this.ota) throw new MatterOperationError("connection_failed", this.otaError ?? "The OTA Provider endpoint is not installed.");
-    await this.ota.storeImage(image, softwareVersion);
-  }
-
-  async exerciseBdxArm() {
-    if (!this.ota) return { armed: false, cleared: true };
-    return this.ota.exerciseBdxArm();
   }
 
   private async readFacts(peer: RemotePeer, matterNodeId: string): Promise<ObservedFacts> {
@@ -470,13 +399,11 @@ class MatterJsTransport implements ManagementTransport {
     try {
       const reports = await this.collectReports(peer, [
         { endpointId: 0, clusterId: 0x003e, attributeId: 0x0003 },
-        { endpointId: 0, clusterId: 0x002a, attributeId: 0x0001 },
       ], "optional", 1, 0);
       const fabrics = reports.find((report) => report.kind === "value" && report.clusterId === 0x003e && report.attributeId === 0x0003);
-      const update = reports.find((report) => report.kind === "value" && report.clusterId === 0x002a && report.attributeId === 0x0001);
       return {
         commissionedFabricCount: numberOrNull(fabrics?.value),
-        firmwareUpdateEligible: typeof update?.value === "boolean" ? update.value : null,
+        firmwareUpdateEligible: null,
       };
     } catch {
       return { commissionedFabricCount: null, firmwareUpdateEligible: null };

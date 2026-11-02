@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { repositoryPaths } from "@iotedu/contracts/paths";
 import {
   applyCmakeProjectVersion,
   detectGpioConflicts,
@@ -141,14 +142,14 @@ export async function generateNodeWorkspace(options: NodeWorkspaceOptions): Prom
 }> {
   const repoRoot = path.resolve(options.repoRoot);
   const outDir = path.resolve(options.outDir);
-  const referenceDir = path.resolve(repoRoot, "reference/matter-dht11");
+  const referenceDir = repositoryPaths(repoRoot).firmwareTemplateRoot;
   if (outDir === referenceDir || outDir.startsWith(`${referenceDir}${path.sep}`)) {
-    throw new Error("The generated workspace must not be written into reference/matter-dht11");
+    throw new Error("The generated workspace must not be written into firmware/template");
   }
   if (options.productId === 0x8000) {
     throw new Error("This Node Type needs its own product id. Product 0x8000 belongs to the DHT11 firmware.");
   }
-  const profile = JSON.parse(await readFile(path.join(repoRoot, "board-profiles/esp32h2.json"), "utf8")) as BoardProfile;
+  const profile = JSON.parse(await readFile(path.join(repositoryPaths(repoRoot).boardProfilesRoot, "esp32h2.json"), "utf8")) as BoardProfile;
   const issues = detectGpioConflicts(profile, options.pins);
   if (issues.some((issue) => issue.level === "error")) {
     throw new Error(issues.map((issue) => issue.message).join("; "));
@@ -274,11 +275,11 @@ export async function generateCatalogueWorkspace(options: CatalogueWorkspaceOpti
 }> {
   const repoRoot = path.resolve(options.repoRoot);
   const outDir = path.resolve(options.outDir);
-  const referenceDir = path.resolve(repoRoot, "reference/matter-dht11");
+  const referenceDir = repositoryPaths(repoRoot).firmwareTemplateRoot;
   if (outDir === referenceDir || outDir.startsWith(`${referenceDir}${path.sep}`)) {
-    throw new Error("The generated workspace must not be written into reference/matter-dht11");
+    throw new Error("The generated workspace must not be written into firmware/template");
   }
-  const profile = JSON.parse(await readFile(path.join(repoRoot, "board-profiles/esp32h2.json"), "utf8")) as BoardProfile;
+  const profile = JSON.parse(await readFile(path.join(repositoryPaths(repoRoot).boardProfilesRoot, "esp32h2.json"), "utf8")) as BoardProfile;
   const pins = [
     { componentId: "custom-dht11", pinName: "DHT11_DATA", gpio: options.dht11Gpio },
     ...(options.extraPins ?? []),
@@ -389,9 +390,9 @@ export async function generateRetainedWorkspace(options: RetainedWorkspaceOption
 }> {
   const repoRoot = path.resolve(options.repoRoot);
   const outDir = path.resolve(options.outDir);
-  const referenceDir = path.resolve(repoRoot, "reference/matter-dht11");
+  const referenceDir = repositoryPaths(repoRoot).firmwareTemplateRoot;
   if (outDir === referenceDir || outDir.startsWith(`${referenceDir}${path.sep}`)) {
-    throw new Error("The generated workspace must not be written into reference/matter-dht11");
+    throw new Error("The generated workspace must not be written into firmware/template");
   }
   if (options.vendorId !== 0xfff1) {
     throw new Error("A retained composition uses vendor 0xFFF1.");
@@ -402,7 +403,7 @@ export async function generateRetainedWorkspace(options: RetainedWorkspaceOption
   if (options.devices.length === 0) {
     throw new Error("A retained composition needs at least one sensor or actuator.");
   }
-  const profile = JSON.parse(await readFile(path.join(repoRoot, "board-profiles/esp32h2.json"), "utf8")) as BoardProfile;
+  const profile = JSON.parse(await readFile(path.join(repositoryPaths(repoRoot).boardProfilesRoot, "esp32h2.json"), "utf8")) as BoardProfile;
   const pins = options.devices.flatMap((device) => device.pins);
   const issues = detectGpioConflicts(profile, pins);
   if (issues.some((issue) => issue.level === "error")) {

@@ -5,8 +5,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="${IOTEDU_WORKSPACE:-$ROOT/firmware/out/dht11-node}"
-LOG="$ROOT/docs/modular-build.log"
+# Generated output matches repositoryPaths().firmwareRoot + "/out".
+OUT="${IOTEDU_WORKSPACE:-$ROOT/node-data/firmware/out/dht11-node}"
+LOG="${IOTEDU_BUILD_LOG:-$ROOT/node-data/firmware/out/modular-build.log}"
 
 # shellcheck disable=SC1091
 source "$ROOT/scripts/idf_env.sh"
@@ -14,6 +15,7 @@ source "$ROOT/scripts/idf_env.sh"
 npx tsx "$ROOT/scripts/generate_dht11_workspace.ts" "$OUT"
 
 rm -rf "$OUT/build"
+mkdir -p "$(dirname "$LOG")"
 IDF_PY=(python "$IDF_PATH/tools/idf.py")
 
 {

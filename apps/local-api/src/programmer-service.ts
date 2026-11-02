@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { BuildJob, EraseAssessment, EraseRequest, EraseSession, FlashBackupRecord, HardwareInstallation, ProgramRequest, ProgramSession } from "@iotedu/contracts";
@@ -25,13 +25,14 @@ import {
   flashProgressPercent,
   isAllowedSerialPort,
   listSerialPorts,
-  bootCaptureMessage,
+  FLASH_VERIFIED_BOOT_PENDING,
   bootListenSettled,
+  bootResultMessage,
   firmwareConsole,
   installationSummary,
   PORT_REAPPEAR_FAILED,
   packageProgrammingBlock,
-  parseFlashImages,
+  flashImagesFromPlan,
   readAppElfSha256,
   redactSerialLog,
   runApplicationReset,
@@ -49,6 +50,8 @@ import { loadReferenceLayout, sdkconfigValue, type BoardProfile, type ToolchainI
 import { classifyHostSerialPorts, serialPortOccupants, type ClassifiedSerialPort, type PortOccupant } from "@iotedu/firmware-builder/usb-ports";
 import type { BuildRepository } from "./store.js";
 import { JsonJobRepository } from "./store.js";
+import { installationFromStoredOnboarding, keepDistinctPasscode, mergeStoredOnboarding, onboardingFromSession, retainProgramSessions, verifiedDevelopmentOnboarding, type StoredDeviceOnboarding } from "./session-history.js";
+import { FirmwareArtifactError, firmwareArchiveDir, openFirmwarePackage, readFirmwareArtifact } from "./firmware-artifacts.js";
 
 function parseConfigId(value: string | null): number | null {
   if (!value) return null;
@@ -106,13 +109,16 @@ export type PortLister = () => Promise<string[]>;
 export type ChipProbe = typeof probeChip;
 export type AppReset = typeof runApplicationReset;
 export type OccupantLookup = (port: string) => Promise<PortOccupant[]>;
+export type PortClassifier = (ports: string[]) => Promise<ClassifiedSerialPort[]>;
 
 export interface ProgrammerOptions {
   toolchain?: ToolchainInspection;
   flashIo?: FlashIo;
   backupRoot?: string;
+  archiveDir?: string;
   appReset?: AppReset;
   occupants?: OccupantLookup;
+  classifyPorts?: PortClassifier;
 }
 
 const REQUIRED = ["bootloader.bin", "sensors.bin", "partition-table.bin", "ota_data_initial.bin", "usb-image.bin", "flasher_args.json"];
@@ -134,6 +140,7 @@ interface StoredFactoryResetWatch {
 
 export class LocalProgrammerService {
   private readonly sessions: JsonJobRepository<ProgramSession>;
+  private readonly onboarding: JsonJobRepository<StoredDeviceOnboarding>;
   private readonly eraseSessions: JsonJobRepository<EraseSession>;
   private readonly factoryResets: JsonJobRepository<StoredFactoryResetWatch>;
   private readonly running = new Map<string, AbortController>();
@@ -145,6 +152,8 @@ export class LocalProgrammerService {
   private readonly backupRoot: string;
   private readonly appReset: AppReset;
   private readonly occupants: OccupantLookup;
+  private readonly classifyPorts: PortClassifier;
+  private readonly archiveDirectory: string;
   private saveChain: Promise<void> = Promise.resolve();
   private logChain: Promise<void> = Promise.resolve();
 
@@ -160,11 +169,21 @@ export class LocalProgrammerService {
     private readonly identifyChip: ChipProbe = probeChip,
     options: ProgrammerOptions = {},
   ) {
-    this.sessions = new JsonJobRepository(path.join(dataDir, "programmer-sessions.json"));
+    this.sessions = new JsonJobRepository(path.join(dataDir, "programmer-sessions.json"), {
+      tolerant: true,
+      retain: (items) => retainProgramSessions(items),
+      beforeWrite: (items) => this.rememberOnboarding(items),
+    });
+    this.onboarding = new JsonJobRepository(path.join(dataDir, "device-onboarding.json"), { tolerant: true });
     this.eraseSessions = new JsonJobRepository(path.join(dataDir, "erase-sessions.json"));
     this.factoryResets = new JsonJobRepository(path.join(dataDir, "factory-reset-observations.json"));
+    const hostPorts = listPorts === listSerialPorts;
     this.appReset = options.appReset ?? runApplicationReset;
-    this.occupants = options.occupants ?? serialPortOccupants;
+    this.occupants = options.occupants ?? (hostPorts ? serialPortOccupants : async () => []);
+    this.classifyPorts = options.classifyPorts ?? (hostPorts
+      ? classifyHostSerialPorts
+      : async (ports) => ports.map((port) => ({ path: port, role: "unknown" as const, label: "USB serial" })));
+    this.archiveDirectory = options.archiveDir ?? firmwareArchiveDir();
     this.toolchain = options.toolchain ?? {
       nativeAvailable,
       programmingAvailable: nativeAvailable,
@@ -201,6 +220,7 @@ export class LocalProgrammerService {
       session.updatedAt = new Date().toISOString();
       await this.sessions.save(session);
     }
+    await this.pruneSessionHistory();
     for (const session of await this.eraseSessions.list()) {
       if (session.status !== "running") continue;
       session.status = "interrupted";
@@ -268,7 +288,45 @@ export class LocalProgrammerService {
         } : {}),
       });
     }
+    const stored = await this.onboarding.list();
+    for (const record of stored) {
+      const key = [...ranked.keys()].find((candidate) => candidate.toLowerCase() === record.id);
+      const existing = key ? ranked.get(key) : undefined;
+      if (existing) {
+        if (!existing.deviceOnboarding) {
+          ranked.set(key ?? record.id, {
+            ...existing,
+            deviceOnboarding: { qrPayload: record.qrPayload, manualCode: record.manualCode },
+            vendorId: existing.vendorId ?? record.vendorId,
+            productId: existing.productId ?? record.productId,
+          });
+        }
+        continue;
+      }
+      ranked.set(record.id, installationFromStoredOnboarding(record));
+    }
     return [...ranked.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  }
+
+  private async rememberOnboarding(sessions: ProgramSession[]): Promise<void> {
+    const remembered = sessions.flatMap((session) => {
+      const record = onboardingFromSession(session);
+      return record ? [record] : [];
+    });
+    const developed = (await Promise.all(sessions.map((session) => this.developmentOnboardingRecord(session)))).flatMap((record) => record ? [record] : []);
+    if (remembered.length === 0 && developed.length === 0) return;
+    const current = await this.onboarding.list();
+    let merged = mergeStoredOnboarding(current, remembered);
+    for (const record of developed) merged = keepDistinctPasscode(merged, record);
+    const unchanged = merged.length === current.length && merged.every((item, index) => item.id === current[index]?.id && item.qrPayload === current[index]?.qrPayload && item.manualCode === current[index]?.manualCode);
+    if (!unchanged) await this.onboarding.replace(merged);
+  }
+
+  private async pruneSessionHistory(): Promise<void> {
+    const sessions = await this.sessions.list();
+    await this.rememberOnboarding(sessions);
+    const kept = retainProgramSessions(sessions);
+    if (kept.length !== sessions.length) await this.sessions.replace(kept);
   }
 
   portsAvailable(): Promise<string[]> {
@@ -277,7 +335,7 @@ export class LocalProgrammerService {
 
   async portDetails(): Promise<ClassifiedSerialPort[]> {
     const available = (await this.listPorts()).filter((port) => isAllowedSerialPort(port));
-    const devices = await classifyHostSerialPorts(available);
+    const devices = await this.classifyPorts(available);
     return Promise.all(devices.map(async (device) => {
       const occupants = await this.occupants(device.path);
       const ownedByApplication = this.ports.has(device.path) || occupants.some((item) => item.pid === process.pid);
@@ -492,16 +550,20 @@ export class LocalProgrammerService {
       throw new ProgrammerError("That serial port is not currently connected.", 400, "port_missing");
     }
     const { job, plan } = await this.preparePlan(buildId, port);
-    if (!plan.ok) {
-      throw new ProgrammerError(plan.issues[0]?.message ?? "The package is not safe to write.", 400, plan.issues[0]?.code ?? "layout_rejected");
+    try {
+      if (!plan.ok) {
+        throw new ProgrammerError(plan.issues[0]?.message ?? "The package is not safe to write.", 400, plan.issues[0]?.code ?? "layout_rejected");
+      }
+      return {
+        buildId: job.id,
+        softwareVersion: job.request.softwareVersion,
+        softwareVersionString: job.request.softwareVersionString,
+        regions: plan.regions,
+        preserved: ["nvs", "nvs_keys", "fctry", "esp_secure_cert", "phy_init"],
+      };
+    } finally {
+      await plan.cleanup();
     }
-    return {
-      buildId: job.id,
-      softwareVersion: job.request.softwareVersion,
-      softwareVersionString: job.request.softwareVersionString,
-      regions: plan.regions,
-      preserved: ["nvs", "nvs_keys", "fctry", "esp_secure_cert", "phy_init"],
-    };
   }
 
   async start(input: ProgramRequest): Promise<ProgramSession> {
@@ -528,6 +590,7 @@ export class LocalProgrammerService {
     }
     const { job, plan } = await this.preparePlan(input.buildId, input.port);
     if (!plan.ok) {
+      await plan.cleanup();
       throw new ProgrammerError(plan.issues[0]?.message ?? "The package is not safe to write.", 400, plan.issues[0]?.code ?? "layout_rejected");
     }
 
@@ -556,8 +619,14 @@ export class LocalProgrammerService {
     };
     session.checks = this.checksFor(session);
     this.ports.set(input.port, session.id);
-    await this.sessions.save(session);
-    void this.execute(session, plan.args);
+    try {
+      await this.sessions.save(session);
+    } catch (error) {
+      if (this.ports.get(input.port) === session.id) this.ports.delete(input.port);
+      await plan.cleanup();
+      throw error;
+    }
+    void this.execute(session, plan.regions, plan.args, plan.cleanup);
     return session;
   }
 
@@ -570,6 +639,7 @@ export class LocalProgrammerService {
       session.stage = "idle";
       session.monitorLog = clip(`${session.monitorLog}\nnote: serial monitor closed`);
       session.checks = this.checksFor(session);
+      if (session.status === "succeeded") session.message = bootResultMessage(session.monitorLog, session.checks, session.status) ?? session.message;
       session.updatedAt = new Date().toISOString();
       await this.persist(session);
     }
@@ -579,15 +649,8 @@ export class LocalProgrammerService {
   async readLog(id: string): Promise<{ status: ProgramSession["status"]; tail: string; progressPercent: number | null } | null> {
     const session = await this.sessions.get(id);
     if (!session) return null;
-    const file = path.join(this.dataDir, "programmer", id, "write.log");
-    let tail = session.logs.join("\n");
-    try {
-      const text = await readFile(file, "utf8");
-      tail = text.split(/\r?\n/).slice(-200).join("\n");
-    } catch {
-      // The session record is enough until the log file exists.
-    }
-    return { status: session.status, tail: redactSerialLog(tail), progressPercent: session.progressPercent };
+    const tail = redactSerialLog(session.logs.slice(-200).join("\n"));
+    return { status: session.status, tail, progressPercent: session.progressPercent };
   }
 
   async monitor(id: string): Promise<ProgramSession> {
@@ -618,20 +681,16 @@ export class LocalProgrammerService {
     if (!session) throw new ProgrammerError("Programming session not found.", 404, "not_found");
     const redacted = redactSerialLog(session.monitorLog);
     if (!redacted.trim()) throw new ProgrammerError("There is no serial log to save.", 409, "log_empty");
-    const file = path.join(this.dataDir, "programmer", id, "serial-redacted.log");
-    await mkdir(path.dirname(file), { recursive: true });
-    await writeFile(file, redacted.endsWith("\n") ? redacted : `${redacted}\n`, "utf8");
-    return { bytes: Buffer.byteLength(redacted) };
+    session.savedSerialLog = redacted.endsWith("\n") ? redacted : `${redacted}\n`;
+    session.updatedAt = new Date().toISOString();
+    await this.sessions.save(session);
+    return { bytes: Buffer.byteLength(session.savedSerialLog) };
   }
 
   async savedLog(id: string): Promise<string | null> {
     const session = await this.sessions.get(id);
-    if (!session) return null;
-    try {
-      return await readFile(path.join(this.dataDir, "programmer", id, "serial-redacted.log"), "utf8");
-    } catch {
-      return null;
-    }
+    const saved = session?.savedSerialLog?.trim();
+    return saved ? session?.savedSerialLog ?? null : null;
   }
 
   private async rejectUnusablePackage(buildId: string): Promise<BuildJob> {
@@ -642,45 +701,65 @@ export class LocalProgrammerService {
     return job;
   }
 
-  private async preparePlan(buildId: string, port: string): Promise<{ job: BuildJob; plan: FlashPlan }> {
+  private async preparePlan(buildId: string, port: string): Promise<{ job: BuildJob; plan: FlashPlan & { cleanup: () => Promise<void> } }> {
     const job = await this.rejectUnusablePackage(buildId);
-    const artifactDir = this.artifactDirectory(job);
-    const files: Record<string, Buffer> = {};
-    for (const name of REQUIRED) {
-      if (name === "flasher_args.json") continue;
-      files[name] = await readFile(path.join(artifactDir, name));
+    let opened: { directory: string; cleanup: () => Promise<void> };
+    try {
+      opened = await openFirmwarePackage({
+        dataDir: this.dataDir,
+        archiveDir: this.archiveDirectory,
+        buildId: job.id,
+        files: REQUIRED.map((name) => {
+          const artifact = job.artifacts.find((item) => item.name === name);
+          return { name, relativePath: artifact?.relativePath, expectedSha256: artifact?.sha256 };
+        }),
+      });
+    } catch (error) {
+      if (error instanceof FirmwareArtifactError) throw new ProgrammerError(error.message, 400, error.code);
+      throw error;
     }
-    const flasher = JSON.parse(await readFile(path.join(artifactDir, "flasher_args.json"), "utf8")) as FlashArguments;
-    const layout = await loadReferenceLayout(this.repoRoot, this.profile);
-    const plan = buildWritePlan({
-      flasher,
-      artifactDir,
-      port,
-      partitions: layout.partitions,
-      bootloaderOffset: this.profile.bootloaderOffset,
-      partitionTableOffset: this.profile.partitionTableOffset,
-      flashSizeBytes: this.profile.flashSizeBytes,
-      files,
-    });
-    return { job, plan };
+    try {
+      const files: Record<string, Buffer> = {};
+      for (const name of REQUIRED) {
+        if (name === "flasher_args.json") continue;
+        files[name] = await readFile(path.join(opened.directory, name));
+      }
+      const flasher = JSON.parse(await readFile(path.join(opened.directory, "flasher_args.json"), "utf8")) as FlashArguments;
+      const layout = await loadReferenceLayout(this.repoRoot, this.profile);
+      const plan = buildWritePlan({
+        flasher,
+        artifactDir: opened.directory,
+        port,
+        partitions: layout.partitions,
+        bootloaderOffset: this.profile.bootloaderOffset,
+        partitionTableOffset: this.profile.partitionTableOffset,
+        flashSizeBytes: this.profile.flashSizeBytes,
+        files,
+      });
+      return { job, plan: { ...plan, cleanup: opened.cleanup } };
+    } catch (error) {
+      await opened.cleanup();
+      throw error;
+    }
   }
 
-  private artifactDirectory(job: BuildJob): string {
-    const root = path.resolve(this.dataDir);
-    const paths = REQUIRED.map((name) => {
-      const artifact = job.artifacts.find((item) => item.name === name);
-      if (!artifact) throw new ProgrammerError(`The package is missing ${name}.`, 400, "artifact_missing");
-      const absolute = path.resolve(root, artifact.relativePath);
-      if (!absolute.startsWith(`${root}${path.sep}`)) {
-        throw new ProgrammerError("Artifact path is outside the data directory.", 400, "rejected_path");
-      }
-      return absolute;
-    });
-    const directory = path.dirname(paths[0] ?? "");
-    if (paths.some((file) => path.dirname(file) !== directory)) {
-      throw new ProgrammerError("Package files are not in one directory.", 400, "rejected_path");
+  private async readPackageBytes(job: BuildJob, name: string, verify: boolean): Promise<Buffer> {
+    const artifact = job.artifacts.find((item) => item.name === name);
+    try {
+      const resolved = await readFirmwareArtifact({
+        dataDir: this.dataDir,
+        archiveDir: this.archiveDirectory,
+        buildId: job.id,
+        name,
+        relativePath: artifact?.relativePath,
+        expectedSha256: artifact?.sha256,
+        verify,
+      });
+      return resolved.bytes;
+    } catch (error) {
+      if (error instanceof FirmwareArtifactError) throw new ProgrammerError(error.message, 400, error.code);
+      throw error;
     }
-    return directory;
   }
 
   private readonly packageEvidenceCache = new Map<string, Promise<{ elfSha256: string | null; compiledTestDiscriminator: boolean }>>();
@@ -696,25 +775,16 @@ export class LocalProgrammerService {
   private async loadPackageEvidence(buildId: string): Promise<{ elfSha256: string | null; compiledTestDiscriminator: boolean }> {
     const job = await this.builds.get(buildId);
     if (!job) return { elfSha256: null, compiledTestDiscriminator: false };
-    let directory: string;
     try {
-      directory = this.artifactDirectory(job);
+      const sdkconfig = await this.readPackageBytes(job, "sdkconfig", false);
+      const application = await this.readPackageBytes(job, "sensors.bin", false);
+      return {
+        elfSha256: readAppElfSha256(application),
+        compiledTestDiscriminator: usesCompiledTestDiscriminator(sdkconfig.toString("utf8")),
+      };
     } catch {
       return { elfSha256: null, compiledTestDiscriminator: false };
     }
-    let compiledTestDiscriminator = false;
-    try {
-      compiledTestDiscriminator = usesCompiledTestDiscriminator(await readFile(path.join(directory, "sdkconfig"), "utf8"));
-    } catch {
-      compiledTestDiscriminator = false;
-    }
-    let elfSha256: string | null = null;
-    try {
-      elfSha256 = readAppElfSha256(await readFile(path.join(directory, "sensors.bin")));
-    } catch {
-      elfSha256 = null;
-    }
-    return { elfSha256, compiledTestDiscriminator };
   }
 
   private async onboardingForBuild(
@@ -750,7 +820,7 @@ export class LocalProgrammerService {
     let productId: number | null = null;
     if (job) {
       try {
-        const sdkconfig = await readFile(path.join(this.artifactDirectory(job), "sdkconfig"), "utf8");
+        const sdkconfig = (await this.readPackageBytes(job, "sdkconfig", false)).toString("utf8");
         vendorId = parseConfigId(sdkconfigValue(sdkconfig, "CONFIG_DEVICE_VENDOR_ID"));
         productId = parseConfigId(sdkconfigValue(sdkconfig, "CONFIG_DEVICE_PRODUCT_ID"));
       } catch {
@@ -872,7 +942,7 @@ export class LocalProgrammerService {
     let vendorId: number | null = null;
     let productId: number | null = null;
     try {
-      const sdkconfig = await readFile(path.join(this.artifactDirectory(job), "sdkconfig"), "utf8");
+      const sdkconfig = (await this.readPackageBytes(job, "sdkconfig", false)).toString("utf8");
       vendorId = parseConfigId(sdkconfigValue(sdkconfig, "CONFIG_DEVICE_VENDOR_ID"));
       productId = parseConfigId(sdkconfigValue(sdkconfig, "CONFIG_DEVICE_PRODUCT_ID"));
     } catch {
@@ -912,12 +982,7 @@ export class LocalProgrammerService {
   }
 
   private async withFlashImages(session: ProgramSession): Promise<ProgramSession> {
-    try {
-      const text = await readFile(path.join(this.dataDir, "programmer", session.id, "write.log"), "utf8");
-      return { ...session, flashImages: parseFlashImages(text) };
-    } catch {
-      return { ...session, flashImages: [] };
-    }
+    return { ...session, flashImages: session.flashImages ?? [] };
   }
 
   private checksFor(session: ProgramSession) {
@@ -946,15 +1011,15 @@ export class LocalProgrammerService {
     if (percent !== null) session.progressPercent = percent;
     session.checks = this.checksFor(session);
     session.updatedAt = new Date().toISOString();
-    this.logChain = this.logChain.then(async () => {
-      const file = path.join(this.dataDir, "programmer", session.id, "write.log");
-      await mkdir(path.dirname(file), { recursive: true });
-      await appendFile(file, `${redactSerialLog(line)}\n`);
-      await this.persist(session);
-    });
+    this.logChain = this.logChain.then(() => this.persist(session));
   }
 
-  private async execute(session: ProgramSession, args: string[]): Promise<void> {
+  private async execute(
+    session: ProgramSession,
+    regions: FlashPlan["regions"],
+    args: string[],
+    cleanup: () => Promise<void> = async () => undefined,
+  ): Promise<void> {
     const controller = new AbortController();
     this.running.set(session.id, controller);
     try {
@@ -967,6 +1032,8 @@ export class LocalProgrammerService {
         onLog: (line) => this.note(session, line),
       });
       await this.logChain;
+      const verified = result.ok && !result.cancelled && !controller.signal.aborted;
+      session.flashImages = flashImagesFromPlan(regions, verified);
       if (result.cancelled || controller.signal.aborted) {
         session.status = "interrupted";
         session.message = "The write was cancelled. It is not recorded as a success.";
@@ -974,7 +1041,7 @@ export class LocalProgrammerService {
       } else if (result.ok) {
         session.status = "succeeded";
         session.progressPercent = 100;
-        session.message = "Unable to verify firmware boot. Flash contents were verified, but no application startup was observed.";
+        session.message = FLASH_VERIFIED_BOOT_PENDING;
         this.note(session, session.message);
       } else if (result.timedOut) {
         session.status = "interrupted";
@@ -992,6 +1059,7 @@ export class LocalProgrammerService {
     } catch (error) {
       session.status = "failed";
       session.stage = "idle";
+      session.flashImages = session.flashImages ?? flashImagesFromPlan(regions, false);
       session.message = error instanceof Error ? error.message : "The write failed.";
       session.checks = this.checksFor(session);
       session.updatedAt = new Date().toISOString();
@@ -999,6 +1067,7 @@ export class LocalProgrammerService {
     } finally {
       this.running.delete(session.id);
       if (this.ports.get(session.port) === session.id) this.ports.delete(session.port);
+      await cleanup().catch(() => undefined);
     }
   }
 
@@ -1245,56 +1314,74 @@ export class LocalProgrammerService {
     const blocked = packageProgrammingBlock(job);
     if (blocked) return empty(blocked.message);
     try {
-      const artifactDir = this.artifactDirectory(job);
-      const files: Record<string, Buffer> = {};
-      const mismatches: string[] = [];
-      for (const name of REQUIRED) {
-        if (name === "flasher_args.json") continue;
-        const artifact = job.artifacts.find((item) => item.name === name);
-        const bytes = await readFile(path.join(artifactDir, name));
-        files[name] = bytes;
-        if (!artifact || !/^[a-f0-9]{64}$/.test(artifact.sha256) || artifact.sha256 !== sha256(bytes)) mismatches.push(name);
-      }
-      const flasher = JSON.parse(await readFile(path.join(artifactDir, "flasher_args.json"), "utf8")) as FlashArguments;
-      const layout = await loadReferenceLayout(this.repoRoot, this.profile);
-      const plan = buildWritePlan({
-        flasher,
-        artifactDir,
-        port,
-        partitions: layout.partitions,
-        bootloaderOffset: this.profile.bootloaderOffset,
-        partitionTableOffset: this.profile.partitionTableOffset,
-        flashSizeBytes: this.profile.flashSizeBytes,
-        files,
-      });
-      let sdkconfig: string | null = null;
-      try {
-        sdkconfig = await readFile(path.join(artifactDir, "sdkconfig"), "utf8");
-      } catch {
-        sdkconfig = null;
-      }
-      const ends = layout.partitions.map((row) => (row.offset ?? 0) + row.size);
-      return inspectPackageForRecovery({
+      const opened = await openFirmwarePackage({
+        dataDir: this.dataDir,
+        archiveDir: this.archiveDirectory,
         buildId: job.id,
-        planOk: plan.ok,
-        planDetail: plan.ok ? "The four-image plan is valid." : plan.issues[0]?.message ?? "The package is not safe to write.",
-        bootloader: files["bootloader.bin"] ?? null,
-        application: files["sensors.bin"] ?? null,
-        sdkconfig,
-        hashesOk: mismatches.length === 0,
-        hashDetail: mismatches.length === 0 ? "Package checksums match." : `Checksum mismatch for ${mismatches.join(", ")}.`,
-        packageFlashBytes: this.profile.flashSizeBytes,
-        deviceFlashBytes,
-        partitionEnd: ends.length ? Math.max(...ends) : null,
+        files: REQUIRED.map((name) => {
+          const artifact = job.artifacts.find((item) => item.name === name);
+          return { name, relativePath: artifact?.relativePath, expectedSha256: artifact?.sha256 };
+        }),
       });
+      try {
+        const files: Record<string, Buffer> = {};
+        const mismatches: string[] = [];
+        for (const name of REQUIRED) {
+          if (name === "flasher_args.json") continue;
+          const artifact = job.artifacts.find((item) => item.name === name);
+          const bytes = await readFile(path.join(opened.directory, name));
+          files[name] = bytes;
+          if (!artifact || !/^[a-f0-9]{64}$/.test(artifact.sha256) || artifact.sha256 !== sha256(bytes)) mismatches.push(name);
+        }
+        const flasher = JSON.parse(await readFile(path.join(opened.directory, "flasher_args.json"), "utf8")) as FlashArguments;
+        const layout = await loadReferenceLayout(this.repoRoot, this.profile);
+        const plan = buildWritePlan({
+          flasher,
+          artifactDir: opened.directory,
+          port,
+          partitions: layout.partitions,
+          bootloaderOffset: this.profile.bootloaderOffset,
+          partitionTableOffset: this.profile.partitionTableOffset,
+          flashSizeBytes: this.profile.flashSizeBytes,
+          files,
+        });
+        let sdkconfig: string | null = null;
+        try {
+          sdkconfig = await readFile(path.join(opened.directory, "sdkconfig"), "utf8");
+        } catch {
+          try {
+            sdkconfig = (await this.readPackageBytes(job, "sdkconfig", false)).toString("utf8");
+          } catch {
+            sdkconfig = null;
+          }
+        }
+        const ends = layout.partitions.map((row) => (row.offset ?? 0) + row.size);
+        return inspectPackageForRecovery({
+          buildId: job.id,
+          planOk: plan.ok,
+          planDetail: plan.ok ? "The four-image plan is valid." : plan.issues[0]?.message ?? "The package is not safe to write.",
+          bootloader: files["bootloader.bin"] ?? null,
+          application: files["sensors.bin"] ?? null,
+          sdkconfig,
+          hashesOk: mismatches.length === 0,
+          hashDetail: mismatches.length === 0 ? "Package checksums match." : `Checksum mismatch for ${mismatches.join(", ")}.`,
+          packageFlashBytes: this.profile.flashSizeBytes,
+          deviceFlashBytes,
+          partitionEnd: ends.length ? Math.max(...ends) : null,
+        });
+      } finally {
+        await opened.cleanup();
+      }
     } catch (error) {
-      return empty(error instanceof ProgrammerError ? error.message : "The firmware package could not be read.");
+      return empty(error instanceof ProgrammerError || error instanceof FirmwareArtifactError ? error.message : "The firmware package could not be read.");
     }
   }
 
   private async consoleForBuild(buildId: string) {
     try {
-      const text = await readFile(path.join(this.dataDir, "builds", buildId, "artifacts", "sdkconfig"), "utf8");
+      const job = await this.builds.get(buildId);
+      if (!job) return firmwareConsole("");
+      const text = (await this.readPackageBytes(job, "sdkconfig", false)).toString("utf8");
       return firmwareConsole(text);
     } catch {
       return firmwareConsole("");
@@ -1311,10 +1398,46 @@ export class LocalProgrammerService {
     return false;
   }
 
+  private async developmentOnboardingRecord(session: ProgramSession): Promise<StoredDeviceOnboarding | null> {
+    try {
+      if (session.status !== "succeeded") return null;
+      const identity = installationIdentity({
+        log: `${session.logs.join("\n")}\n${session.monitorLog}`,
+        storedMac: session.baseMac ?? null,
+        recordedAt: session.updatedAt,
+      });
+      if (!identity.mac || identity.conflict) return null;
+      const job = await this.builds.get(session.buildId);
+      let vendorId: number | null = null;
+      let productId: number | null = null;
+      if (job) {
+        try {
+          const sdkconfig = (await this.readPackageBytes(job, "sdkconfig", false)).toString("utf8");
+          vendorId = parseConfigId(sdkconfigValue(sdkconfig, "CONFIG_DEVICE_VENDOR_ID"));
+          productId = parseConfigId(sdkconfigValue(sdkconfig, "CONFIG_DEVICE_PRODUCT_ID"));
+        } catch {
+          vendorId = null;
+          productId = null;
+        }
+      }
+      const verification = await this.onboardingForBuild(session.buildId, job?.request.softwareVersion ?? null, session.softwareVersionString, vendorId, productId, session.monitorLog);
+      return verifiedDevelopmentOnboarding({
+        mac: identity.mac,
+        vendorId,
+        productId,
+        verification,
+        commissioningState: commissioningFromLog(session.monitorLog).state,
+        updatedAt: session.updatedAt,
+      });
+    } catch {
+      return null;
+    }
+  }
+
   private finishBootCapture(session: ProgramSession): void {
     session.stage = "idle";
     session.checks = this.checksFor(session);
-    session.message = bootCaptureMessage(session.monitorLog) ?? installationSummary(session.checks, session.status) ?? session.message;
+    session.message = bootResultMessage(session.monitorLog, session.checks, session.status) ?? session.message;
     session.updatedAt = new Date().toISOString();
   }
 
@@ -1535,7 +1658,7 @@ export class LocalProgrammerService {
     } finally {
       session.stage = "idle";
       session.checks = this.checksFor(session);
-      if (session.status === "succeeded") session.message = installationSummary(session.checks, session.status) ?? session.message;
+      if (session.status === "succeeded") session.message = bootResultMessage(session.monitorLog, session.checks, session.status) ?? session.message;
       session.updatedAt = new Date().toISOString();
       await this.persist(session);
       this.monitors.delete(session.id);

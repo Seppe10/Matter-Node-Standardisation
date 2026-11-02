@@ -13,6 +13,7 @@ import {
   flashProgressPercent,
   isAllowedSerialPort,
   packageProgrammingBlock,
+  flashImagesFromPlan,
   parseFlashImages,
   readAppElfSha256,
   redactSerialLog,
@@ -21,6 +22,7 @@ import {
   applicationBootSeen,
   bootCaptureMessage,
   bootListenSettled,
+  bootResultMessage,
   firmwareConsole,
   installationSummary,
   startupChecks,
@@ -255,6 +257,15 @@ describe("USB programmer", () => {
     digest.copy(image, 144);
     expect(readAppElfSha256(image)).toBe(digest.toString("hex"));
     expect(readAppElfSha256(Buffer.from("not an image"))).toBeNull();
+
+    const planned = flashImagesFromPlan([
+      { offset: "0x0", artifact: "bootloader.bin", bytes: 21696 },
+      { offset: "0x20000", artifact: "sensors.bin", bytes: 1000 },
+    ], false);
+    expect(planned).toEqual([
+      { label: "bootloader.bin", offset: 0, bytes: 21696, hashVerified: false, seconds: null },
+      { label: "sensors.bin", offset: 0x20000, bytes: 1000, hashVerified: false, seconds: null },
+    ]);
 
     const images = parseFlashImages([
       "Wrote 21696 bytes (13414 compressed) at 0x00000000 in 0.2 seconds (effective 933.1 kbit/s)...",
@@ -529,6 +540,27 @@ describe("USB programmer", () => {
     expect(failed.find((item) => item.id === "version")?.status).toBe("passed");
     expect(failed.find((item) => item.id === "matter")?.status).toBe("failed");
     expect(failed.find((item) => item.id === "openthread")?.status).toBe("unknown");
+    const running = [
+      "I (598) app_init: App version: 1.5.0",
+      "I (699) main_task: Calling app_main()",
+      "I (709) dht11_matter: Initialising DHT11 on GPIO4",
+      "I (789) chip[DL]: OpenThread started: OK",
+      "I (1429) chip[DL]: CHIPoBLE advertising started",
+      "I (2739) dht11_matter: DHT11 temperature 24 C, humidity 36%",
+      "Failed to advertise commissionable node: 3",
+      "note: cancellation requested. Stopping the USB tool.",
+    ].join("\n");
+    const booted = startupChecks({ writeLog: "Wrote 1592992 bytes at 0x00020000\nHash of data verified.", monitorLog: running, versionString: "1.5.0", writeStatus: "succeeded" });
+    expect(booted.find((item) => item.id === "boot")?.status).toBe("passed");
+    expect(booted.find((item) => item.id === "version")?.status).toBe("passed");
+    expect(booted.find((item) => item.id === "matter")?.status).toBe("passed");
+    expect(booted.find((item) => item.id === "matter")?.detail).toMatch(/DNS-SD/);
+    expect(booted.find((item) => item.id === "dht11")?.status).toBe("passed");
+    expect(bootResultMessage(running, booted, "succeeded")).toBe("Firmware Installed and Verified.");
+    expect(installationSummary(booted, "succeeded")).toBe("Firmware Installed and Verified.");
+    const pending = startupChecks({ writeLog: "Hash of data verified.", monitorLog: "", versionString: "1.5.0", writeStatus: "succeeded" });
+    expect(installationSummary(pending, "succeeded")).toMatch(/has not been captured yet/);
+    expect(bootResultMessage("I (1) boot: something else", pending, "succeeded")).toMatch(/no application startup was observed/);
   });
 
   it("identifies an ESP32-H2 without starting a flash write", async () => {

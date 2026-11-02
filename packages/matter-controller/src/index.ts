@@ -15,7 +15,6 @@ export { MatterOperationError } from "./errors.js";
 export { projectPresence } from "./presence.js";
 export { LiveMatterManagementService, normalizePairingCode } from "./service.js";
 export { redactSecrets } from "./redact.js";
-export { applyProviderEvent, confirmInstalledVersion, initialOtaStages, interruptRunningJob, reconcileObservedFirmware, recordStage, transferCompleted, type ExpectedFirmwareIdentity } from "./ota-job.js";
 
 /**
  * Phase 1 stand-in. It records a local node and never opens a Matter session,
@@ -31,14 +30,13 @@ export class MockMatterManagementService implements MatterManagementService {
       bleCommissioning: "unsupported",
       threadDataset: "needs_setup",
       firmwareBuild: "mock_only",
-      otaProvider: "mock_only",
+      otaProvider: "unsupported",
       usbFlash: "needs_setup",
       ai: "needs_setup",
       notes: [
         "No matter.js controller is running. Commissioning records are simulated local notes.",
         "Bluetooth commissioning is not implemented on this host.",
         "No Thread operational dataset is stored.",
-        "The OTA Provider is not available. Simulated artifacts cannot be deployed.",
         "USB flashing instructions are documented; no board flash has been run from this app.",
         "AI drafting is disabled until a provider is configured. The key, if any, stays on the server.",
         "A missing controller credential file will not be replaced with a new identity.",
@@ -177,35 +175,8 @@ export class MockMatterManagementService implements MatterManagementService {
     };
   }
 
-  async getOtaProviderStatus(): Promise<import("@iotedu/contracts").OtaProviderStatus> {
-    return { running: false, endpointNumber: null, fabricScoped: false, ledgerOffline: true, architecture: "unavailable" };
-  }
-
-  async readOtaRequestor(matterNodeId: string): Promise<import("@iotedu/contracts").OtaRequestorReport> {
-    return {
-      matterNodeId,
-      clusterPresent: true,
-      updatePossible: true,
-      updateState: 0,
-      updateStateProgress: null,
-      defaultProviderCount: 0,
-      announceAccepted: true,
-      controllerCanAnnounce: true,
-      aclRead: "read",
-      detail: "Mock mode reports an OTA Requestor and an Operate grant. No device was read and no access-control entry was changed.",
-    };
-  }
-
-  async beginOta(_input: { matterNodeId: string; image: Uint8Array; vendorId: number; productId: number; softwareVersion: number }): Promise<void> {
-    throw new Error("The OTA Provider is not running. A simulated record cannot receive firmware.");
-  }
-
   async readInstalledSoftwareVersion(_matterNodeId: string): Promise<number | null> {
     return null;
-  }
-
-  subscribeOta(_listener: (event: import("@iotedu/contracts").OtaProviderEvent) => void): () => void {
-    return () => undefined;
   }
 }
 

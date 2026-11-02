@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { repositoryPaths } from "@iotedu/contracts/paths";
 import { compileLibraryComponent } from "@iotedu/firmware-builder";
 import { addCatalogueRevision, closeCatalogue, type ImportComponent } from "./catalogue-store.js";
 import { loadEnvFile } from "./load-env.js";
@@ -30,10 +31,11 @@ function counts(report: { success: boolean; diagnostics: { level: string; messag
 async function main(): Promise<void> {
   await loadEnvFile(path.join(import.meta.dirname, "../.env"));
   const head = await gitHead();
-  const dhtRoot = path.join(repo, "catalogue/components/dht11");
-  const photoRoot = path.join(repo, "catalogue/components/photosensitive");
-  const rgbRoot = path.join(repo, "catalogue/components/rgb_led");
-  const coreRoot = path.join(repo, "firmware/components/iotedu_core");
+  const paths = repositoryPaths(repo);
+  const dhtRoot = path.join(paths.catalogueRoot, "components", "dht11");
+  const photoRoot = path.join(paths.catalogueRoot, "components", "photosensitive");
+  const rgbRoot = path.join(paths.catalogueRoot, "components", "rgb_led");
+  const coreRoot = path.join(paths.firmwareComponentsRoot, "iotedu_core");
   const [dhtFiles, photoFiles, rgbFiles, coreFiles] = await Promise.all([
     textFiles(dhtRoot, [
       { path: "dht11.c", role: "source" },
@@ -119,7 +121,7 @@ async function main(): Promise<void> {
       validationState: "draft",
       files: coreFiles,
       gpio: [],
-      matter: { endpoints: [], clusters: [], attributes: [], ownedBy: "component", interfaceName: "iotedu_core_prepare", signature: "esp_err_t iotedu_core_prepare(esp_matter::node_t **node)", notes: `Content-addressed source of firmware/components/iotedu_core. Git HEAD ${head} is a reference only because the working tree may contain other changes. The blob hashes identify the core.` },
+      matter: { endpoints: [], clusters: [], attributes: [], ownedBy: "component", interfaceName: "iotedu_core_prepare", signature: "esp_err_t iotedu_core_prepare(esp_matter::node_t **node)", notes: `Content-addressed source of node-data/firmware/components/iotedu_core. Git HEAD ${head} is a reference only because the working tree may contain other changes. The blob hashes identify the core.` },
       dependsOn: [],
       validation: { errors: 0, warnings: 0, issues: [], nativeCompile: "not_run", integrationCompile: "not_run" },
       archiveName: "working-tree",

@@ -34,9 +34,9 @@ const NEW_DEVICE_LIMITATION =
 export class LiveMatterManagementService implements MatterManagementService {
   private startupError: string | null = null;
   private transportPromise: Promise<ManagementTransport> | null = null;
-  private providerInstalled = false;
-  private unsubscribeOta: (() => void) | null = null;
-  private readonly otaListeners = new Set<(event: import("@iotedu/contracts").OtaProviderEvent) => void>();
+  private restoreTask: Promise<void> | null = null;
+  private restoreState: "pending" | "starting" | "ready" | "failed" = "pending";
+  private stopRefresh = false;
 
   constructor(
     private readonly nodes: NodeRepository,
@@ -46,14 +46,14 @@ export class LiveMatterManagementService implements MatterManagementService {
 
   async getCapabilities(): Promise<CapabilityReport> {
     const inspection = await inspectIdentity(this.dataDir, FABRIC_LABEL);
-    const ready = inspection.state === "ready" && !this.startupError;
+    const ready = inspection.state === "ready" && this.restoreState !== "starting" && !this.startupError;
     return {
       applicationVersion: APP_VERSION,
       matterCommissioning: ready ? "available" : "needs_setup",
       bleCommissioning: "unsupported",
       threadDataset: "needs_setup",
       firmwareBuild: "mock_only",
-      otaProvider: this.providerInstalled ? "available" : "needs_setup",
+      otaProvider: "unsupported",
       usbFlash: "needs_setup",
       ai: "needs_setup",
       notes: [
@@ -62,11 +62,9 @@ export class LiveMatterManagementService implements MatterManagementService {
         NEW_DEVICE_LIMITATION,
         "Controller keys stay in the data directory and are not written to Git. A stored identity is not replaced when it fails to load.",
         BACKUP_INSTRUCTIONS,
-        "Administrative reads use Basic Information, Descriptor, Operational Credentials, and the OTA requestor. Sensor measurements and actuator commands are not requested.",
+        "Administrative reads use Basic Information, Descriptor, and Operational Credentials. Sensor measurements and actuator commands are not requested.",
         `The firmware accepts at most ${FABRIC_LIMIT} fabrics. A fabric-table rejection does not factory reset the node.`,
-        this.providerInstalled
-          ? "The OTA Provider cluster is installed on this controller. The DCL is offline. No image transfer to a physical node has been verified."
-          : "The OTA Provider is not running. Hardware verification of commissioning has not been recorded.",
+        "Hardware verification of commissioning has not been recorded.",
       ],
     };
   }
@@ -75,7 +73,7 @@ export class LiveMatterManagementService implements MatterManagementService {
     const inspection = await inspectIdentity(this.dataDir, FABRIC_LABEL);
     if (inspection.state === "ready") {
       return {
-        identityLoaded: this.startupError == null,
+        identityLoaded: this.restoreState !== "starting" && this.startupError == null,
         persisted: true,
         fabricLabel: inspection.identity.fabricLabel,
         fabricId: inspection.identity.fabricId,
@@ -83,8 +81,10 @@ export class LiveMatterManagementService implements MatterManagementService {
         controllerNodeId: inspection.identity.controllerNodeId,
         matterJsVersion: inspection.identity.matterJsVersion,
         regenerationBlocked: true,
-        message: this.startupError
-          ?? "The management identity is stored and will be reused. IoT.Edu will not generate a replacement.",
+        message: this.restoreState === "starting"
+          ? "The management controller is opening its stored identity. The API remains available. IoT.Edu will not generate a replacement identity."
+          : this.startupError
+            ?? "The management identity is stored and will be reused. IoT.Edu will not generate a replacement.",
         backup: BACKUP_INSTRUCTIONS,
       };
     }
@@ -139,13 +139,25 @@ export class LiveMatterManagementService implements MatterManagementService {
   }
 
   async restore(): Promise<void> {
+    this.restoreTask ??= this.restoreStored();
+    return this.restoreTask;
+  }
+
+  private async restoreStored(): Promise<void> {
     const inspection = await inspectIdentity(this.dataDir, FABRIC_LABEL);
-    if (inspection.state !== "ready") return;
+    if (inspection.state !== "ready") {
+      this.restoreState = "ready";
+      return;
+    }
+    this.restoreState = "starting";
     try {
       const transport = await this.transport({ create: false });
+      this.restoreState = "ready";
+      console.log(JSON.stringify({ source: "iotedu-api", event: "matter-controller", state: "ready" }));
       const saved = (await this.nodes.list()).filter((node) => node.matterNodeId && !node.simulated);
       const observations: ObservedNode[] = [];
       for (const node of saved) {
+        if (this.stopRefresh) break;
         const matterNodeId = node.matterNodeId;
         if (!matterNodeId) continue;
         try {
@@ -154,49 +166,24 @@ export class LiveMatterManagementService implements MatterManagementService {
           observations.push(offlineObservation(matterNodeId));
         }
       }
-      await this.applyObservations(observations);
+      if (!this.stopRefresh) await this.applyObservations(observations);
     } catch (error) {
+      this.restoreState = "failed";
       this.startupError = error instanceof Error ? redactSecrets(error.message) : "The stored controller identity could not be opened.";
     }
   }
 
   async close(): Promise<void> {
-    this.unsubscribeOta?.();
-    this.unsubscribeOta = null;
+    this.stopRefresh = true;
+    if (this.restoreTask) await this.restoreTask.catch(() => undefined);
     if (!this.transportPromise) return;
-    const transport = await this.transportPromise;
-    await transport.close();
-    this.transportPromise = null;
-    this.providerInstalled = false;
-  }
-
-  async readOtaRequestor(matterNodeId: string) {
-    if (!this.transportPromise) {
-      throw new MatterOperationError("identity_missing", "The management controller is not running, so the OTA Requestor was not read.");
-    }
-    const transport = await this.transportPromise;
-    if (!transport.readOtaRequestor) {
-      throw new MatterOperationError("connection_failed", "This controller build cannot read the OTA Requestor. No update was announced.");
-    }
-    return transport.readOtaRequestor(matterNodeId);
-  }
-
-  async getOtaProviderStatus() {
-    if (!this.transportPromise) {
-      return { running: false, endpointNumber: null, fabricScoped: false, ledgerOffline: true };
-    }
     try {
-      return await (await this.transportPromise).otaProviderStatus();
+      const transport = await this.transportPromise;
+      await transport.close();
     } catch {
-      return { running: false, endpointNumber: null, fabricScoped: false, ledgerOffline: true };
+      return;
     }
-  }
-
-  async beginOta(input: { matterNodeId: string; image: Uint8Array; vendorId: number; productId: number; softwareVersion: number }) {
-    if (!this.transportPromise) {
-      throw new MatterOperationError("identity_missing", "The management controller is not running, so no image was offered.");
-    }
-    await (await this.transportPromise).beginOta(input);
+    this.transportPromise = null;
   }
 
   async readApplicationModel(matterNodeId: string) {
@@ -212,11 +199,6 @@ export class LiveMatterManagementService implements MatterManagementService {
     const result = await this.refreshNode(node.id);
     if (result.liveRead !== "read") return null;
     return result.node.softwareVersion;
-  }
-
-  subscribeOta(listener: (event: import("@iotedu/contracts").OtaProviderEvent) => void) {
-    this.otaListeners.add(listener);
-    return () => this.otaListeners.delete(listener);
   }
 
   async commission(input: CommissionRequest, onProgress?: (event: CommissionProgress) => void) {
@@ -599,6 +581,8 @@ export class LiveMatterManagementService implements MatterManagementService {
         message: "An enhanced commissioning window was opened for a second administrator. The code is shown once and is redacted from logs.",
         manualPairingCode: window.manualPairingCode || undefined,
         qrPairingCode: window.qrPairingCode || undefined,
+        durationSeconds: window.durationSeconds,
+        openedAt: new Date().toISOString(),
       };
     } catch (error) {
       return {
@@ -615,13 +599,6 @@ export class LiveMatterManagementService implements MatterManagementService {
         : import("./live.js").then((module) => module.openMatterTransport(this.directory(), options));
     }
     const transport = await this.transportPromise;
-    const status = await transport.otaProviderStatus();
-    this.providerInstalled = status.running;
-    if (!this.unsubscribeOta) {
-      this.unsubscribeOta = transport.subscribeOta((event) => {
-        for (const listener of this.otaListeners) listener(event);
-      });
-    }
     return transport;
   }
 

@@ -2,12 +2,13 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { repositoryPaths } from "@iotedu/contracts/paths";
 import { versionSupersedes } from "./index.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-const rangesHeader = path.join(repoRoot, "firmware/components/iotedu_dht11/include/iotedu_dht11_ranges.h");
-const driver = path.join(repoRoot, "firmware/components/iotedu_dht11/iotedu_dht11.cpp");
-const core = path.join(repoRoot, "firmware/components/iotedu_core/iotedu_core.cpp");
+const rangesHeader = path.join(repoRoot, "packages/firmware-builder/src/hosts/iotedu_dht11_ranges.h");
+const driver = path.join(repoRoot, "packages/firmware-builder/src/hosts/dht11_matter.cpp");
+const core = path.join(repositoryPaths(repoRoot).firmwareComponentsRoot, "iotedu_core", "iotedu_core.cpp");
 
 function constant(header: string, name: string): number {
   const match = header.match(new RegExp(`#define ${name} (-?\\d+)`));

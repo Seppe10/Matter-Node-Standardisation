@@ -58,7 +58,8 @@ describe("hardware installation evidence", () => {
     expect(open.manualCode).toBe("34970112332");
     expect(open.windowWarning).toMatch(/not verified as open now/);
     expect(onboardingDecision({ ...verifiedIdentity, commissioningState: "unknown", commissioningWindowOpen: null }).show).toBe(false);
-    expect(onboardingDecision({ ...verifiedIdentity, softwareVersionString: "1.2.0", commissioningState: "uncommissioned", commissioningWindowOpen: true, onboardingStatus: "verified" }).show).toBe(false);
+    expect(onboardingDecision({ ...verifiedIdentity, softwareVersionString: "1.2.0", commissioningState: "uncommissioned", commissioningWindowOpen: true, onboardingStatus: "not_verified" }).show).toBe(false);
+    expect(onboardingDecision({ ...verifiedIdentity, softwareVersionString: "1.5.0", softwareVersion: 6, commissioningState: "uncommissioned", commissioningWindowOpen: true, onboardingStatus: "verified" }).reason).toMatch(/shared development setup code/);
     expect(onboardingDecision({ ...verifiedIdentity, vendorId: null, commissioningState: "uncommissioned", commissioningWindowOpen: true, onboardingStatus: "verified" }).show).toBe(false);
     expect(onboardingDecision({
       ...verifiedIdentity,
@@ -66,7 +67,14 @@ describe("hardware installation evidence", () => {
       commissioningState: "uncommissioned",
       commissioningWindowOpen: true,
       onboardingStatus: "verified",
-    }).reason).toMatch(/not verified/);
+    }).reason).toMatch(/No stored Matter onboarding payload/);
+    expect(onboardingDecision({
+      ...verifiedIdentity,
+      bootVerified: false,
+      commissioningState: "uncommissioned",
+      commissioningWindowOpen: true,
+      onboardingStatus: "verified",
+    }).reason).not.toMatch(/firmware/);
   });
 
   it("reads the 12:48 pm first-boot pattern without calling the window closed", () => {
@@ -128,6 +136,23 @@ describe("hardware installation evidence", () => {
     expect(verifyOnboarding({ ...matchedFields(), advertisedDiscriminator: null, discriminatorRedacted: false }).reason).toMatch(/does not contain/);
     expect(verifyOnboarding({ ...matchedFields(), productId: 1 }).status).toBe("not_verified");
     expect(verifyOnboarding({ ...matchedFields(), softwareVersionString: "1.2.0" }).status).toBe("not_verified");
+    const currentFirmware = verifyOnboarding({
+      ...matchedFields(),
+      softwareVersion: 6,
+      softwareVersionString: "1.5.0",
+      usesCompiledTestDiscriminator: true,
+    });
+    expect(currentFirmware.status).toBe("verified");
+    expect(currentFirmware.reason).toMatch(/shared development|compiled test discriminator/);
+    expect(JSON.stringify(currentFirmware)).not.toContain("20202021");
+    const unconfirmed = verifyOnboarding({
+      ...matchedFields(),
+      softwareVersion: 6,
+      softwareVersionString: "1.5.0",
+    });
+    expect(unconfirmed.status).toBe("not_verified");
+    expect(unconfirmed.reason).toMatch(/did not print a setup passcode/);
+    expect(unconfirmed.reason).not.toMatch(/20202021/);
   });
 
   it("keeps Apple Home distinct from another stored vendor", () => {
@@ -413,7 +438,8 @@ describe("onboarding verification levels", () => {
     expect(onboardingDecision({ ...ready, matterReady: false, matterStartup: "unknown" }).show).toBe(false);
     expect(onboardingDecision({ ...ready, commissioningState: "commissioned", commissioningWindowOpen: false }).show).toBe(false);
     expect(onboardingDecision({ ...ready, onboardingStatus: "not_verified" }).show).toBe(false);
-    expect(onboardingDecision({ ...ready, productId: 0x8000, softwareVersion: 7, softwareVersionString: "1.6.0" }).show).toBe(false);
+    expect(onboardingDecision({ ...ready, productId: 0x8000, softwareVersion: 6, softwareVersionString: "1.5.0", onboardingStatus: "verified" }).show).toBe(true);
+    expect(onboardingDecision({ ...ready, productId: 0x8000, softwareVersion: 6, softwareVersionString: "1.5.0", onboardingStatus: "verified", nvsPreserved: true }).reason).toMatch(/shared development setup code/);
     const mismatched = verifyOnboarding({
       ...ready,
       advertisedDiscriminator: 1,
@@ -473,6 +499,38 @@ describe("onboarding verification levels", () => {
     expect(recovered.show).toBe(true);
     expect(recovered.reason).toMatch(/compiled development payload/);
     expect(onboardingDecision({ ...ready, deviceOnboarding: { qrPayload: "MT:NOT-A-CODE", manualCode: "00000000000" } }).show).toBe(false);
+    const withoutFirmware = onboardingDecision({
+      ...ready,
+      writeCompleted: false,
+      bootVerified: false,
+      matterReady: false,
+      versionVerified: false,
+      deviceOnboarding: { qrPayload: printed.qrPayload ?? "", manualCode: printed.manualCode ?? "" },
+    });
+    expect(withoutFirmware.show).toBe(true);
+    expect(withoutFirmware.payload).toBe(compiled?.qrPayload);
+    expect(withoutFirmware.reason).toMatch(/does not depend on a firmware build record/);
+    const commissioned = onboardingDecision({
+      ...ready,
+      commissioningState: "commissioned",
+      commissioningWindowOpen: false,
+      windowNow: "closed",
+      deviceOnboarding: { qrPayload: printed.qrPayload ?? "", manualCode: printed.manualCode ?? "" },
+    });
+    expect(commissioned.show).toBe(true);
+    expect(commissioned.windowWarning).toMatch(/Original setup code/);
+    expect(commissioned.windowWarning).toMatch(/does not open a commissioning window/);
+    const commissionedWithoutFirmware = onboardingDecision({
+      ...ready,
+      writeCompleted: false,
+      bootVerified: false,
+      versionVerified: false,
+      commissioningState: "commissioned",
+      deviceOnboarding: null,
+    });
+    expect(commissionedWithoutFirmware.show).toBe(false);
+    expect(commissionedWithoutFirmware.reason).toMatch(/already has a Matter fabric/);
+    expect(commissionedWithoutFirmware.reason).not.toMatch(/firmware/);
   });
 
   it("keeps a stored installation MAC distinct from a live chip-id reading", () => {

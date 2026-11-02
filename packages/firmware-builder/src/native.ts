@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { copyFile, mkdir, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import type { ValidationIssue } from "@iotedu/contracts";
+import { repositoryPaths } from "@iotedu/contracts/paths";
 import {
   firmwareCompatibilityIssues,
   loadReferenceLayout,
@@ -272,11 +273,11 @@ export async function runNativeDht11Build(spec: NativeBuildSpec): Promise<Native
     }
 
     const profile = JSON.parse(
-      await readFile(path.join(spec.repoRoot, "board-profiles/esp32h2.json"), "utf8"),
+      await readFile(path.join(repositoryPaths(spec.repoRoot).boardProfilesRoot, "esp32h2.json"), "utf8"),
     ) as BoardProfile;
     const layout = await loadReferenceLayout(spec.repoRoot, profile);
     const slot = layout.partitions.find((row) => row.name === "ota_0");
-    const referenceLock = await readFile(path.join(spec.repoRoot, "reference/matter-dht11/dependencies.lock"));
+    const referenceLock = await readFile(path.join(repositoryPaths(spec.repoRoot).firmwareTemplateRoot, "dependencies.lock"));
     const builtLock = await readFile(path.join(spec.artifactDir, "dependencies.lock"));
     issues.push(
       ...firmwareCompatibilityIssues({

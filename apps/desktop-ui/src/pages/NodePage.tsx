@@ -15,12 +15,6 @@ function connectionText(node: ManagedNode): string | null {
   return presenceLabel(node);
 }
 
-function eligibilityText(value: boolean | null | undefined): string | null {
-  if (value === true) return "OTA requestor reported update possible";
-  if (value === false) return "OTA requestor reported update not possible";
-  return null;
-}
-
 export function NodePage() {
   const { id = "" } = useParams();
   const [node, setNode] = useState<ManagedNode | null>(null);
@@ -73,7 +67,6 @@ export function NodePage() {
         </div>
         <div className="row">
           <Link className="button secondary" to={`/builder?node=${node.id}`}>Software configuration</Link>
-          <Link className="button secondary" to={`/ota?node=${node.id}`}>OTA</Link>
         </div>
       </header>
       {node.simulated && <div className="banner">Simulated record. No fabric credential was created for this node.</div>}
@@ -101,7 +94,6 @@ export function NodePage() {
               {identityRow("Recorded", formatLocalDateTime(node.createdAt))}
               {identityRow("Last updated", formatLocalDateTime(node.updatedAt))}
               {identityRow("Reachability error", node.reachabilityError)}
-              {identityRow("Firmware update eligibility", eligibilityText(node.firmwareUpdateEligible))}
               {identityRow("Partition layout", node.partitionLayoutId)}
               {node.installedComponents.length > 0 && identityRow("Installed components", node.installedComponents.join(", "))}
             </tbody>

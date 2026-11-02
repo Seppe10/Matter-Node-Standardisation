@@ -4,7 +4,6 @@ export const DESCRIPTOR_CLUSTER_ID = 0x001d;
 export const PARTS_LIST_ATTRIBUTE_ID = 0x0003;
 export const DEVICE_TYPE_LIST_ATTRIBUTE_ID = 0x0000;
 export const SERVER_LIST_ATTRIBUTE_ID = 0x0001;
-export const OTA_REQUESTOR_CLUSTER_ID = 0x002a;
 
 export interface ApplicationEndpoint {
   endpointId: number;

@@ -4,9 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { ComponentManifest } from "@iotedu/contracts";
+import { repositoryPaths } from "@iotedu/contracts/paths";
 import { approvedLibraryRecords, detectGpioConflicts, extractSafeZip, validateLibraryComponent, zipCrc32, type BoardProfile } from "./index.js";
 
-const profile = JSON.parse(readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "../../../board-profiles/esp32h2.json"), "utf8")) as BoardProfile;
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const profile = JSON.parse(readFileSync(path.join(repositoryPaths(repoRoot).boardProfilesRoot, "esp32h2.json"), "utf8")) as BoardProfile;
 
 function source(text: string, name = "sensor.c") {
   return [{ name, data: Buffer.from(text) }];

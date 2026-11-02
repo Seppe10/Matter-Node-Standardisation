@@ -40,13 +40,17 @@ export function parseLsofRecords(text: string): PortOccupant[] {
   return found;
 }
 
+async function commandOutput(command: string, args: string[], timeoutMs: number, maxBuffer = 1024 * 1024): Promise<string> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const { stdout } = await promisify(execFile)(command, args, { timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer });
+  return stdout;
+}
+
 export async function serialPortOccupants(port: string): Promise<PortOccupant[]> {
   try {
-    const { execFile } = await import("node:child_process");
-    const { promisify } = await import("node:util");
     try {
-      const { stdout } = await promisify(execFile)("lsof", ["-nP", "-Fpc", port], { timeout: 3_000 });
-      return parseLsofRecords(stdout);
+      return parseLsofRecords(await commandOutput("lsof", ["-nP", "-Fpc", port], 3_000));
     } catch (error) {
       if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return [];
       const stdout = error && typeof error === "object" && "stdout" in error && typeof error.stdout === "string" ? error.stdout : "";
@@ -59,9 +63,7 @@ export async function serialPortOccupants(port: string): Promise<PortOccupant[]>
 
 export async function serialPortBusy(port: string): Promise<boolean> {
   try {
-    const { execFile } = await import("node:child_process");
-    const { promisify } = await import("node:util");
-    const { stdout } = await promisify(execFile)("lsof", ["-nP", port], { timeout: 3_000 });
+    const stdout = await commandOutput("lsof", ["-nP", port], 3_000);
     return stdout.includes(port);
   } catch (error) {
     if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return false;
@@ -103,9 +105,7 @@ export async function classifyHostSerialPorts(callouts: string[]): Promise<Class
   const unknown = callouts.map((path) => ({ path, role: "unknown" as const, label: "USB serial" }));
   if (process.platform !== "darwin" || callouts.length === 0) return unknown;
   try {
-    const { execFile } = await import("node:child_process");
-    const { promisify } = await import("node:util");
-    const { stdout } = await promisify(execFile)("system_profiler", ["SPUSBDataType", "-json"], { timeout: 8_000, maxBuffer: 8_000_000 });
+    const stdout = await commandOutput("system_profiler", ["SPUSBDataType", "-json"], 8_000, 8_000_000);
     return classifySerialPorts(callouts, collectUsbRecords(JSON.parse(stdout)));
   } catch {
     return unknown;

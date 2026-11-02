@@ -70,6 +70,9 @@ export interface UsbRunnerResult {
   diagnostic: string | null;
 }
 
+export const FLASH_VERIFIED_BOOT_PENDING =
+  "Flash contents were verified. Application startup has not been captured yet.";
+
 export const FLASH_VERIFIED_BOOT_UNSEEN =
   "Unable to verify firmware boot. Flash contents were verified, but no application startup was observed.";
 
@@ -97,7 +100,7 @@ export const BOOTLOADER_ONLY_CAPTURE =
 export const APPLICATION_LISTEN_GRACE_MS = 4_000;
 
 export function applicationBootSeen(monitorLog: string): boolean {
-  return /cpu_start:|Calling app_main|App version:|App "sensors"|Extended colour light endpoint|Failed to prepare the Matter core|Failed to register the RGB|Failed to start Matter|Failed to create the extended/i.test(monitorLog);
+  return /cpu_start:|app_init:|Calling app_main|App version:|App "sensors"|Extended colour light endpoint|Failed to prepare the Matter core|Failed to register the RGB|Failed to start Matter|Failed to create the extended/i.test(monitorLog);
 }
 
 export function bootloaderStarted(monitorLog: string): boolean {
@@ -244,6 +247,19 @@ export interface ParsedFlashImage {
   bytes: number | null;
   hashVerified: boolean;
   seconds: number | null;
+}
+
+export function flashImagesFromPlan(
+  regions: Array<{ offset: string; artifact: string; bytes: number }>,
+  hashVerified: boolean,
+): ParsedFlashImage[] {
+  return regions.map((region) => ({
+    label: region.artifact,
+    offset: Number.parseInt(region.offset, 16),
+    bytes: region.bytes,
+    hashVerified,
+    seconds: null,
+  }));
 }
 
 export function parseFlashImages(log: string): ParsedFlashImage[] {
@@ -567,7 +583,7 @@ export function startupChecks(input: {
   const threadFailed = /Failed to initialize OpenThread|OpenThread start failed/i.test(input.monitorLog);
   const threadSeen = /OpenThread|esp_openthread|OPENTHREAD/.test(input.monitorLog);
   const dhtFailed = /Failed to initialize DHT11/.test(input.monitorLog);
-  const dhtSeen = /DHT11 Temperature|DHT11 read failed/.test(input.monitorLog);
+  const dhtSeen = /DHT11 Temperature|DHT11 temperature|Initialising DHT11|DHT11 read failed/i.test(input.monitorLog);
 
   const connect: StartupCheck = input.writeStatus === "succeeded" || /ESP32-H2 responded/.test(input.writeLog)
     ? { id: "connect", label: "Connect ESP32-H2 via USB", status: "passed", detail: "The USB tool reached a board before or during the write." }
@@ -595,10 +611,13 @@ export function startupChecks(input: {
         ? { id: "boot", label: "Confirm successful boot", status: "unknown", detail: "The ROM and second-stage bootloader started from SPI flash. The application log was not in this capture." }
         : { id: "boot", label: "Confirm successful boot", status: "unknown", detail: "No ESP32-H2 application startup has been captured." };
 
+  const discoveryFailed = /Failed to advertise commissionable node|Failed to finalize service update|Failed to remove advertised services/i.test(input.monitorLog);
   const matter: StartupCheck = matterFailed
     ? { id: "matter", label: "Confirm Matter startup", status: "failed", detail: /Failed to register the RGB light/.test(input.monitorLog) ? "The application stopped while registering the RGB light, before Matter started. This is not a BLE or fabric result." : "The firmware logged a Matter startup failure." }
     : matterServer
-      ? { id: "matter", label: "Confirm Matter startup", status: "passed", detail: "The Matter server reported listening, a stored fabric, or an onboarding code. Commissioning is a separate result." }
+      ? { id: "matter", label: "Confirm Matter startup", status: "passed", detail: discoveryFailed
+        ? "The Matter server or CHIPoBLE advertising started. DNS-SD commissionable advertising failed separately. That does not by itself mean Bluetooth commissioning failed."
+        : "The Matter server reported listening, a stored fabric, or an onboarding code. Commissioning is a separate result." }
       : matterStack
         ? { id: "matter", label: "Confirm Matter startup", status: "unknown", detail: "The Matter stack started. This capture ended before the server reported listening, a fabric, or an onboarding code." }
         : { id: "matter", label: "Confirm Matter startup", status: "unknown", detail: "Not yet performed. A USB installation does not wait for Matter commissioning." };
@@ -641,7 +660,23 @@ export function installationSummary(checks: StartupCheck[], writeStatus: Program
   if (required.some((item) => item === "failed")) return "Firmware Installed — Verification Failed.";
   const boot = checks.find((item) => item.id === "boot")?.status;
   if (boot === "passed") return INSTALL_SUCCEEDED_COMMISSIONING_NOT_PERFORMED;
-  return FLASH_VERIFIED_BOOT_UNSEEN;
+  return FLASH_VERIFIED_BOOT_PENDING;
+}
+
+/** A finished capture with device text but no application startup is a completed negative result. */
+export function bootResultMessage(monitorLog: string, checks: StartupCheck[], writeStatus: ProgramSession["status"]): string | null {
+  const summary = installationSummary(checks, writeStatus);
+  const captured = bootCaptureMessage(monitorLog);
+  if (captured) return captured;
+  const boot = checks.find((item) => item.id === "boot")?.status;
+  const deviceText = monitorLog.split(/\r?\n/).some((line) => {
+    const trimmed = line.trim();
+    return trimmed.length > 0 && !trimmed.startsWith("note:");
+  });
+  if (writeStatus === "succeeded" && boot === "unknown" && deviceText && !applicationBootSeen(monitorLog)) {
+    return FLASH_VERIFIED_BOOT_UNSEEN;
+  }
+  return summary;
 }
 
 export function bootEvidenceReady(checks: StartupCheck[]): boolean {

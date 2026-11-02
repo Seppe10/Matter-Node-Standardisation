@@ -45,6 +45,35 @@ function libraryLoadMessage(reason: unknown): string {
   return "The firmware library could not be loaded.";
 }
 
+function fileFromEntry(entry: FileSystemFileEntry): Promise<File> {
+  return new Promise((resolve, reject) => entry.file(resolve, reject));
+}
+
+function readDirectory(reader: FileSystemDirectoryReader): Promise<FileSystemEntry[]> {
+  return new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+}
+
+async function filesInside(entry: FileSystemDirectoryEntry, prefix: string): Promise<{ file: File; path: string }[]> {
+  const reader = entry.createReader();
+  const children: FileSystemEntry[] = [];
+  while (true) {
+    const batch = await readDirectory(reader);
+    if (batch.length === 0) break;
+    children.push(...batch);
+  }
+  const collected: { file: File; path: string }[] = [];
+  for (const child of children) {
+    if (child.isFile) {
+      const file = await fileFromEntry(child as FileSystemFileEntry);
+      collected.push({ file, path: prefix ? `${prefix}/${child.name}` : child.name });
+    } else if (child.isDirectory) {
+      const next = prefix ? `${prefix}/${child.name}` : child.name;
+      collected.push(...await filesInside(child as FileSystemDirectoryEntry, next));
+    }
+  }
+  return collected;
+}
+
 async function encodeFile(file: File, name: string): Promise<{ name: string; contentBase64: string }> {
   const bytes = new Uint8Array(await file.arrayBuffer());
   let binary = "";
@@ -63,6 +92,8 @@ export function BuilderPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [localIssues, setLocalIssues] = useState<string[]>([]);
+  const [uploadChoices, setUploadChoices] = useState(false);
+  const uploadRef = useRef<HTMLInputElement>(null);
   const ticket = useRef(0);
 
   useEffect(() => {
@@ -232,14 +263,57 @@ export function BuilderPage() {
     }
   }
 
+  function openUpload(directory: boolean) {
+    const input = uploadRef.current;
+    if (!input) return;
+    if (directory) {
+      input.setAttribute("webkitdirectory", "");
+      input.setAttribute("directory", "");
+    } else {
+      input.removeAttribute("webkitdirectory");
+      input.removeAttribute("directory");
+    }
+    setUploadChoices(false);
+    input.click();
+  }
+
+  async function addDropped(transfer: DataTransfer) {
+    const entries = [...transfer.items]
+      .map((item) => item.webkitGetAsEntry?.() ?? null)
+      .filter((entry): entry is FileSystemEntry => entry != null);
+    if (entries.length === 0) {
+      await addUploads([...transfer.files].map((file) => ({ file, path: file.name })));
+      return;
+    }
+    const collected: { file: File; path: string }[] = [];
+    for (const entry of entries) {
+      if (entry.isFile) {
+        const file = await fileFromEntry(entry as FileSystemFileEntry);
+        collected.push({ file, path: file.name });
+      } else if (entry.isDirectory) {
+        collected.push(...await filesInside(entry as FileSystemDirectoryEntry, ""));
+      }
+    }
+    await addUploads(collected);
+  }
+
   async function addFiles(list: FileList | null) {
     if (!list || list.length === 0) return;
+    await addUploads([...list].map((file) => {
+      const relative = file.webkitRelativePath;
+      const path = relative.includes("/") ? relative.split("/").slice(1).join("/") : file.name;
+      return { file, path };
+    }));
+  }
+
+  async function addUploads(items: { file: File; path: string }[]) {
+    if (items.length === 0) return;
     const rejected: string[] = [];
     const accepted: { file: File; name: string }[] = [];
     let skipped = 0;
-    for (const file of list) {
-      const relative = file.webkitRelativePath;
-      const raw = relative.includes("/") ? relative.split("/").slice(1).join("/") : file.name;
+    for (const item of items) {
+      const file = item.file;
+      const raw = item.path;
       if (!raw) continue;
       if (raw.split("/").some((part) => part === "build" || part === "managed_components" || part === "__MACOSX" || part === ".git" || part === ".vscode" || part === "backup" || part.startsWith("."))) {
         skipped += 1;
@@ -324,30 +398,38 @@ export function BuilderPage() {
             </select>
           </label>
           <div className="stack">
-            <label>
-              Upload Custom Code
+            <div
+              className="combined-upload"
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault();
+                void addDropped(event.dataTransfer);
+              }}
+            >
+              <span>Upload Custom Code</span>
+              <button type="button" className="secondary" aria-expanded={uploadChoices} aria-controls="upload-choices" onClick={() => setUploadChoices((open) => !open)}>
+                Choose files or folder
+              </button>
+              {uploadChoices && (
+                <div id="upload-choices" className="combined-upload-choices">
+                  <button type="button" onClick={() => openUpload(false)}>Files</button>
+                  <button type="button" onClick={() => openUpload(true)}>Folder</button>
+                </div>
+              )}
               <input
+                ref={uploadRef}
+                className="sr-only"
                 type="file"
                 multiple
+                tabIndex={-1}
+                aria-hidden="true"
                 onChange={(event) => {
                   void addFiles(event.target.files);
                   event.target.value = "";
                 }}
               />
-            </label>
-            <label>
-              Component folder
-              <input
-                type="file"
-                multiple
-                onChange={(event) => {
-                  void addFiles(event.target.files);
-                  event.target.value = "";
-                }}
-                {...{ webkitdirectory: "", directory: "" }}
-              />
-            </label>
-            <p className="muted">C and C++ sources, headers, CMakeLists.txt, Kconfig, Kconfig.projbuild, or one component ZIP. A folder upload keeps relative paths. Build directories and managed components are not component source.</p>
+            </div>
+            <p className="muted">Choose source files or a component folder, or drop either one here. C and C++ sources, headers, CMakeLists.txt, Kconfig, Kconfig.projbuild, or one component ZIP. A folder keeps relative paths. Build directories and managed components are not component source.</p>
             {(form.retainedFiles.length > 0 || form.newFiles.length > 0) && (
               <ul className="file-list">
                 {form.retainedFiles.map((file) => (

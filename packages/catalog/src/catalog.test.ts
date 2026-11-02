@@ -1,10 +1,11 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { componentManifestDir } from "@iotedu/contracts/paths";
 import { LocalCatalogRepository } from "./index.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
-const manifestDir = path.join(repoRoot, "catalog/manifests");
+const manifestDir = componentManifestDir(repoRoot);
 
 describe("local catalogue", () => {
   const catalog = new LocalCatalogRepository(manifestDir, repoRoot);

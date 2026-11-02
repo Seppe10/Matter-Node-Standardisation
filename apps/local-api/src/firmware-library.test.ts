@@ -6,6 +6,7 @@ import { deflateRawSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import { zipCrc32, type BoardProfile } from "@iotedu/firmware-builder";
 import type { ComponentManifest, LibraryComponent, LibraryValidationResponse } from "@iotedu/contracts";
+import { componentManifestDir, repositoryPaths } from "@iotedu/contracts/paths";
 import { buildApp, readBoardProfile } from "./app.js";
 import { FirmwareLibraryService } from "./firmware-library-service.js";
 
@@ -57,7 +58,7 @@ function packZip(name: string, data: Buffer): Buffer {
   return Buffer.concat([file, central, eocd]);
 }
 
-async function createApp(catalogDir = path.join(repoRoot, "catalog/manifests"), libraryCompile: typeof compiled = compiled) {
+async function createApp(catalogDir = componentManifestDir(repoRoot), libraryCompile: typeof compiled = compiled) {
   const dataDir = await mkdtemp(path.join(tmpdir(), "iotedu-library-"));
   const profile = await readBoardProfile(repoRoot);
   const app = await buildApp({
@@ -140,7 +141,7 @@ describe("firmware library API", () => {
 
   it("rejects create and update when validation still has a warning", async () => {
     let calls = 0;
-    const { app } = await createApp(path.join(repoRoot, "catalog/manifests"), async () => {
+    const { app } = await createApp(componentManifestDir(repoRoot), async () => {
       calls += 1;
       if (calls <= 2) return { available: true, ran: true, success: true, diagnostics: [] };
       return { available: true, ran: true, success: true, diagnostics: [{ level: "warning", message: "unused variable" }] };
@@ -182,7 +183,7 @@ describe("firmware library API", () => {
     expect(updated.json().error.code).toBe("validation_failed");
     expect(updated.json().error.message).toMatch(/Resolve all 1 validation warning/);
 
-    const { app: warned } = await createApp(path.join(repoRoot, "catalog/manifests"), async () => ({
+    const { app: warned } = await createApp(componentManifestDir(repoRoot), async () => ({
       available: true, ran: true, success: false, diagnostics: [{ level: "error", message: "sensor.c:1:1: error: expected declaration" }],
     }));
     const failed = await stageAndValidate(warned);
@@ -357,8 +358,8 @@ describe("firmware library API", () => {
 describe("firmware library storage", () => {
   it("persists across a new service, snapshots revisions, and rolls back a failed write", async () => {
     const dataDir = await mkdtemp(path.join(tmpdir(), "iotedu-store-"));
-    const profile = JSON.parse(await readFile(path.join(repoRoot, "board-profiles/esp32h2.json"), "utf8")) as BoardProfile;
-    const corePath = path.join(repoRoot, "firmware/components/iotedu_core/CMakeLists.txt");
+    const profile = JSON.parse(await readFile(path.join(repositoryPaths(repoRoot).boardProfilesRoot, "esp32h2.json"), "utf8")) as BoardProfile;
+    const corePath = path.join(repositoryPaths(repoRoot).firmwareComponentsRoot, "iotedu_core", "CMakeLists.txt");
     const core = await readFile(corePath);
     const service = new FirmwareLibraryService(dataDir, profile, async () => [], { compile: compiled });
     const staged = await service.stage(componentUploads().map((file) => ({ name: file.name, contentBase64: file.data.toString("base64") })));
@@ -424,6 +425,6 @@ describe("firmware library storage", () => {
     const escaped = packZip("../../firmware/components/iotedu_core/CMakeLists.txt", Buffer.from("changed"));
     await expect(service.stage([{ name: "bad.zip", contentBase64: escaped.toString("base64") }])).rejects.toMatchObject({ code: "unsafe_archive" });
     expect(await readFile(corePath)).toEqual(core);
-    expect(await readdir(path.join(repoRoot, "firmware/components/iotedu_core"))).not.toContain("bad.zip");
+    expect(await readdir(path.join(repositoryPaths(repoRoot).firmwareComponentsRoot, "iotedu_core"))).not.toContain("bad.zip");
   });
 });

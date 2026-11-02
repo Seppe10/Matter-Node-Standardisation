@@ -12,37 +12,35 @@ import {
   libraryStageRequestSchema,
   libraryUpdateRequestSchema,
   libraryValidateRequestSchema,
-  otaRequestSchema,
   eraseRequestSchema,
   programRequestSchema,
   removeNodeRequestSchema,
   retirePeerRequestSchema,
   renameNodeSchema,
   type BuildJob,
-  type OtaJob,
 } from "@iotedu/contracts";
-import { discoverToolchain, inspectToolchain, loadReferenceLayout, type BoardProfile, type ToolchainInspection } from "@iotedu/firmware-builder";
+import { boardProfileFile } from "@iotedu/contracts/paths";
+import { discoverToolchain, loadReferenceLayout, type BoardProfile, type ToolchainInspection } from "@iotedu/firmware-builder";
 import { probeChip, redactSerialLog, verifyProgrammingTools, type FlashIo } from "@iotedu/firmware-builder/programmer";
 import { LiveMatterManagementService, MatterOperationError, MockMatterManagementService } from "@iotedu/matter-controller";
 import type { MatterManagementService } from "@iotedu/contracts";
 import Fastify, { type FastifyInstance } from "fastify";
 import { z, ZodError } from "zod";
-import { startDht11Composition, startNodeTypeComposition, startRetainedComposition } from "./catalogue-compose.js";
-import { loadOtaCatalogue, saveOtaCompositionPlan } from "./ota-composition-store.js";
-import { firmwareOptions, planOtaComposition, type CompositionSelection } from "./ota-composition.js";
+import { startDht11Composition, startNodeTypeComposition } from "./catalogue-compose.js";
+import { classifyFirmwareStorage, FirmwareArtifactError, readFirmwareArtifact } from "./firmware-artifacts.js";
 import { listNodeTypes } from "./node-types.js";
 import { CatalogueError, catalogueEnabled, catalogueStorage, compositionStatus, listFirmwareReleases, listPending, saveSelection } from "./catalogue-store.js";
 import { FirmwareLibraryError, FirmwareLibraryService } from "./firmware-library-service.js";
-import { LocalProgrammerService, ProgrammerError, type AppReset, type MonitorRunner, type OccupantLookup, type PortLister, type UsbRunner } from "./programmer-service.js";
-import { LocalFirmwareBuildService, LocalOtaService, type NativeRunner } from "./services.js";
+import { LocalProgrammerService, ProgrammerError, type AppReset, type MonitorRunner, type OccupantLookup, type PortClassifier, type PortLister, type UsbRunner } from "./programmer-service.js";
+import { LocalFirmwareBuildService, type NativeRunner } from "./services.js";
 import { ReachabilityMonitor } from "./reachability.js";
-import { JsonJobRepository, JsonNodeRepository, appendAudit, redact, removeOrphanTemporaryFiles } from "./store.js";
+import { JsonJobRepository, JsonNodeRepository, redact, removeOrphanTemporaryFiles } from "./store.js";
 import { ALLOWED_ORIGINS, attachAuth, resolveAuthStore } from "./auth-http.js";
 import type { AuthStore } from "./auth-store.js";
 
-function publicSession<T extends object>(session: T): Omit<T, "deviceOnboarding"> {
-  const { deviceOnboarding: _hidden, ...rest } = session as T & { deviceOnboarding?: unknown };
-  const visible = { ...rest } as Omit<T, "deviceOnboarding"> & { monitorLog?: unknown; logs?: unknown };
+function publicSession<T extends object>(session: T): Omit<T, "deviceOnboarding" | "savedSerialLog"> {
+  const { deviceOnboarding: _hidden, savedSerialLog: _saved, ...rest } = session as T & { deviceOnboarding?: unknown; savedSerialLog?: unknown };
+  const visible = { ...rest } as Omit<T, "deviceOnboarding" | "savedSerialLog"> & { monitorLog?: unknown; logs?: unknown };
   if (typeof visible.monitorLog === "string") visible.monitorLog = redactSerialLog(visible.monitorLog);
   if (Array.isArray(visible.logs)) visible.logs = visible.logs.map((line) => typeof line === "string" ? redactSerialLog(line) : line);
   return visible;
@@ -60,6 +58,7 @@ export interface AppPaths {
   runProgram?: UsbRunner;
   runMonitor?: MonitorRunner;
   listPorts?: PortLister;
+  classifyPorts?: PortClassifier;
   flashIo?: FlashIo;
   backupRoot?: string;
   appReset?: AppReset;
@@ -68,8 +67,13 @@ export interface AppPaths {
   libraryCompile?: (files: { name: string; data: Buffer }[]) => Promise<{ available: boolean; ran: boolean; success: boolean; diagnostics: { level: "error" | "warning"; message: string; file?: string; line?: number }[] }>;
   matterMode?: "mock" | "live";
   matter?: MatterManagementService;
+  firmwareArchiveDir?: string;
   reachabilityIntervalMs?: number;
   auth?: AuthStore | "off";
+}
+
+export function startupLog(event: string, fields: Record<string, string | number | boolean | null> = {}): void {
+  console.log(JSON.stringify({ source: "iotedu-api", event, ...fields }));
 }
 
 function boardLimits(profile: BoardProfile) {
@@ -81,13 +85,31 @@ function boardLimits(profile: BoardProfile) {
   };
 }
 
+/** An explicit availability flag is a test or host override. It does not re-inspect the machine toolchain. */
+function syntheticToolchain(nativeAvailable: boolean): ToolchainInspection {
+  return {
+    nativeAvailable,
+    programmingAvailable: nativeAvailable,
+    programmingCode: nativeAvailable ? "ok" : "toolchain_not_installed",
+    idfPathConfigured: nativeAvailable,
+    espMatterPathConfigured: nativeAvailable,
+    activateConfigured: nativeAvailable,
+    source: nativeAvailable ? "environment" : "incomplete",
+    detail: nativeAvailable
+      ? "ESP-IDF v5.4.1 is available to this application."
+      : "ESP-IDF v5.4.1 is not installed. IoT.Edu looked for the v5.4.1 toolchain. A missing toolchain is not a missing USB device.",
+    childEnv: process.env,
+  };
+}
+
 export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
+  startupLog("store", { state: "opening" });
   await removeOrphanTemporaryFiles(paths.dataDir);
   const nodes = new JsonNodeRepository(path.join(paths.dataDir, "nodes.json"));
   const builds = new JsonJobRepository<BuildJob>(path.join(paths.dataDir, "builds.json"));
-  const otas = new JsonJobRepository<OtaJob>(path.join(paths.dataDir, "ota-jobs.json"));
   const catalog = new LocalCatalogRepository(paths.catalogDir, paths.repoRoot);
-  let toolchain = paths.toolchain ?? (paths.nativeAvailable === undefined ? await discoverToolchain() : await inspectToolchain());
+  startupLog("toolchain", { state: "checking" });
+  let toolchain = paths.toolchain ?? (paths.nativeAvailable === undefined ? await discoverToolchain() : syntheticToolchain(paths.nativeAvailable));
   if (!paths.toolchain && paths.nativeAvailable === undefined && toolchain.programmingAvailable) {
     const tools = await verifyProgrammingTools(paths.repoRoot, toolchain.childEnv);
     toolchain = tools.ok
@@ -102,26 +124,35 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
       };
   }
   const nativeAvailable = paths.nativeAvailable ?? toolchain.nativeAvailable;
-  const toolchainForProgrammer: ToolchainInspection = paths.nativeAvailable === false
-    ? {
-      ...toolchain,
-      nativeAvailable: false,
-      programmingAvailable: false,
-      programmingCode: "toolchain_not_installed",
-      detail: "ESP-IDF v5.4.1 is not installed. IoT.Edu looked for the v5.4.1 toolchain. A missing toolchain is not a missing USB device.",
-    }
-    : toolchain;
+  const toolchainForProgrammer = toolchain;
+  startupLog("toolchain", { state: "checked", nativeAvailable, programmingAvailable: toolchainForProgrammer.programmingAvailable });
   const matter = paths.matter
     ?? (paths.matterMode === "live"
       ? new LiveMatterManagementService(nodes, paths.dataDir)
       : new MockMatterManagementService(nodes));
-  await matter.restore();
+  const deferLiveMatter = paths.matterMode === "live";
+  if (deferLiveMatter) {
+    startupLog("matter-controller", { state: "starting" });
+    void matter.restore().then(async () => {
+      const status = await matter.getControllerStatus();
+      startupLog("matter-controller", {
+        state: status.identityLoaded ? "stored-devices-checked" : "unavailable",
+      });
+    }, () => {
+      startupLog("matter-controller", { state: "failed" });
+    });
+  } else {
+    await matter.restore();
+  }
   const firmware = new LocalFirmwareBuildService(catalog, builds, paths.dataDir, paths.repoRoot, paths.profile, {
     nodes,
     nativeAvailable,
     runNative: paths.runNative,
+    archiveDir: paths.firmwareArchiveDir,
   });
+  startupLog("firmware", { state: "recovering" });
   await firmware.recoverInterrupted();
+  startupLog("firmware", { state: "ready" });
   const programmer = new LocalProgrammerService(
     builds,
     paths.dataDir,
@@ -136,15 +167,15 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
       toolchain: toolchainForProgrammer,
       flashIo: paths.flashIo,
       backupRoot: paths.backupRoot,
+      archiveDir: paths.firmwareArchiveDir,
       appReset: paths.appReset,
       occupants: paths.occupants,
+      classifyPorts: paths.classifyPorts,
     },
   );
+  startupLog("programmer", { state: "recovering" });
   await programmer.recoverInterrupted();
-  const ota = new LocalOtaService(builds, otas, nodes, paths.profile, paths.repoRoot, paths.dataDir, matter);
-  ota.attach();
-  await ota.recoverInterrupted();
-  const auditFile = path.join(paths.dataDir, "audit.jsonl");
+  startupLog("programmer", { state: "ready" });
   const reachability = new ReachabilityMonitor(
     nodes,
     matter,
@@ -161,6 +192,13 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
       if (!origin || ALLOWED_ORIGINS.has(origin)) callback(null, true);
       else callback(new Error("Origin is not allowed"), false);
     },
+  });
+  // DNS-rebinding guard. Applies even when authentication is off (no DATABASE_URL).
+  app.addHook("onRequest", async (request, reply) => {
+    const hostname = (request.headers.host ?? "").replace(/:\d+$/, "");
+    if (hostname !== "127.0.0.1" && hostname !== "localhost") {
+      return reply.code(421).header("cache-control", "no-store").send({ error: { code: "host_rejected", message: "This request was rejected." } });
+    }
   });
   const authStore = await resolveAuthStore(paths);
   if (authStore) attachAuth(app, authStore);
@@ -213,16 +251,7 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
     const body = commissionRequestSchema.parse(request.body);
     const wantsStream = String(request.headers.accept ?? "").includes("application/x-ndjson");
     if (!wantsStream) {
-      const result = await matter.commission(body);
-      await appendAudit(auditFile, {
-        action: "commission",
-        path: body.path,
-        nodeId: result.node.id,
-        simulated: result.simulated,
-        matterSessionOpened: result.matterSessionOpened,
-        pairingCode: body.pairingCode ? "redacted" : undefined,
-      });
-      return result;
+      return matter.commission(body);
     }
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -234,14 +263,6 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
     };
     try {
       const result = await matter.commission(body, (event) => send({ type: "progress", ...event }));
-      await appendAudit(auditFile, {
-        action: "commission",
-        path: body.path,
-        nodeId: result.node.id,
-        simulated: result.simulated,
-        matterSessionOpened: result.matterSessionOpened,
-        pairingCode: body.pairingCode ? "redacted" : undefined,
-      });
       send({ type: "result", result });
     } catch (error) {
       const code = error instanceof MatterOperationError ? error.code : "request_failed";
@@ -257,15 +278,7 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
     const body = recoverExistingRequestSchema.parse(request.body);
     const wantsStream = String(request.headers.accept ?? "").includes("application/x-ndjson");
     if (!wantsStream) {
-      const result = await matter.recoverExisting(body);
-      await appendAudit(auditFile, {
-        action: "recover_fabric",
-        nodeId: result.node.id,
-        matterNodeId: result.node.matterNodeId,
-        softwareVersion: result.node.softwareVersion,
-        hardwareMac: result.node.hardwareMac ?? null,
-      });
-      return result;
+      return matter.recoverExisting(body);
     }
     reply.hijack();
     reply.raw.writeHead(200, {
@@ -277,13 +290,6 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
     };
     try {
       const result = await matter.recoverExisting(body, (event) => send({ type: "progress", ...event }));
-      await appendAudit(auditFile, {
-        action: "recover_fabric",
-        nodeId: result.node.id,
-        matterNodeId: result.node.matterNodeId,
-        softwareVersion: result.node.softwareVersion,
-        hardwareMac: result.node.hardwareMac ?? null,
-      });
       send({ type: "result", result });
     } catch (error) {
       const code = error instanceof MatterOperationError ? error.code : "request_failed";
@@ -297,15 +303,7 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
   app.post("/api/nodes/:id/remove", async (request) => {
     const { id } = request.params as { id: string };
     const body = removeNodeRequestSchema.parse(request.body);
-    const result = await matter.removeNode(id, body);
-    await appendAudit(auditFile, {
-      action: "remove_node",
-      nodeId: id,
-      mode: result.mode,
-      physicalFabricRemoved: result.physicalFabricRemoved,
-      localRecordRemoved: result.localRecordRemoved,
-    });
-    return result;
+    return matter.removeNode(id, body);
   });
   app.post("/api/nodes/:id/refresh", async (request) => {
     const { id } = request.params as { id: string };
@@ -421,7 +419,7 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
       return {
         catalogue: "neon",
         requiredFlashBytes: paths.profile.flashSizeBytes,
-        nodeTypes: await listNodeTypes(await firmware.list(), paths.dataDir),
+        nodeTypes: await listNodeTypes(await firmware.list(), paths.dataDir, paths.firmwareArchiveDir),
       };
     } catch (error) {
       if (error instanceof CatalogueError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
@@ -514,7 +512,6 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
   app.post("/api/builds", async (request, reply) => {
     const body = firmwareBuildRequestSchema.parse(request.body);
     const job = await firmware.build(body);
-    await appendAudit(auditFile, { action: "build", id: job.id, status: job.status, simulated: job.simulated });
     if (job.status === "failed") {
       const message = job.validation.issues.find((issue) => issue.level === "error")?.message
         ?? job.logs.at(-1)
@@ -535,12 +532,22 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
     if (!log) return reply.code(404).send({ error: { code: "not_found", message: "Build not found" } });
     return log;
   });
-  app.get("/api/builds", async () => ({ jobs: await firmware.list() }));
+  app.get("/api/builds", async () => ({
+    jobs: await Promise.all((await firmware.list()).map(async (job) => ({
+      ...job,
+      packageLocation: await classifyFirmwareStorage({ dataDir: paths.dataDir, job, archiveDir: paths.firmwareArchiveDir }),
+    }))),
+  }));
   app.get("/api/builds/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
     const job = await firmware.get(id);
     if (!job) return reply.code(404).send({ error: { code: "not_found", message: "Build not found" } });
-    return { job };
+    return {
+      job: {
+        ...job,
+        packageLocation: await classifyFirmwareStorage({ dataDir: paths.dataDir, job, archiveDir: paths.firmwareArchiveDir }),
+      },
+    };
   });
   app.get("/api/builds/:id/artifacts", async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -568,11 +575,27 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
     }
     const root = path.resolve(paths.dataDir);
     const absolute = path.resolve(root, artifact.relativePath);
-    if (!absolute.startsWith(`${root}${path.sep}`)) {
+    if (artifact.relativePath && !absolute.startsWith(`${root}${path.sep}`)) {
       return reply.code(400).send({ error: { code: "rejected_path", message: "Artifact path is outside the data directory." } });
     }
-    const bytes = await readFile(absolute);
-    return reply.header("content-disposition", `attachment; filename="${safeName}"`).type("application/octet-stream").send(bytes);
+    try {
+      const resolved = await readFirmwareArtifact({
+        dataDir: paths.dataDir,
+        archiveDir: paths.firmwareArchiveDir,
+        buildId: job.id,
+        name: safeName,
+        relativePath: artifact.relativePath,
+        expectedSha256: artifact.sha256,
+        verify: /^[a-f0-9]{64}$/.test(artifact.sha256),
+      });
+      return reply.header("content-disposition", `attachment; filename="${safeName}"`).type("application/octet-stream").send(resolved.bytes);
+    } catch (error) {
+      if (error instanceof FirmwareArtifactError) {
+        const status = error.code === "artifact_mismatch" ? 409 : error.code === "rejected_path" ? 400 : 404;
+        return reply.code(status).send({ error: { code: error.code, message: error.message } });
+      }
+      throw error;
+    }
   });
 
   app.get("/api/programmer/ports", async () => {
@@ -629,13 +652,11 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
       buildId: z.string().min(1).max(80),
     }).parse(request.body);
     try {
-      const backup = await programmer.createRecoveryBackup({
+      return await programmer.createRecoveryBackup({
         port: body.port,
         consolePort: body.consolePort ?? null,
         buildId: body.buildId,
       });
-      await appendAudit(auditFile, { action: "flash_backup", id: backup.id, mac: backup.mac, verified: backup.verified });
-      return backup;
     } catch (error) {
       if (error instanceof ProgrammerError) {
         return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
@@ -658,13 +679,6 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
   app.post("/api/programmer/recovery/erase", async (request, reply) => {
     try {
       const session = await programmer.eraseDevice(eraseRequestSchema.parse(request.body));
-      await appendAudit(auditFile, {
-        action: "flash_erase",
-        id: session.id,
-        status: session.status,
-        verifiedBlank: session.verifiedBlank,
-        needsFirmware: session.needsFirmware,
-      });
       return { session };
     } catch (error) {
       if (error instanceof ProgrammerError) {
@@ -743,13 +757,6 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
   app.post("/api/programmer/sessions", async (request, reply) => {
     try {
       const session = await programmer.start(programRequestSchema.parse(request.body));
-      await appendAudit(auditFile, {
-        action: "program",
-        id: session.id,
-        buildId: session.buildId,
-        status: session.status,
-        eraseAll: false,
-      });
       const code = session.status === "running" ? 202 : session.status === "succeeded" ? 201 : 200;
       return reply.code(code).send({ session: publicSession(session) });
     } catch (error) {
@@ -849,249 +856,6 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
     });
   });
 
-  app.get("/api/nodes/:id/ota-configuration", async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const stored = await nodes.getById(id);
-    if (!stored) return reply.code(404).send({ error: { code: "not_found", message: "Node not found." } });
-    let node = stored;
-    let liveRead: "read" | "failed" | "unavailable" = stored.matterNodeId && !stored.simulated ? "failed" : "unavailable";
-    if (stored.matterNodeId && !stored.simulated) {
-      try {
-        const refreshed = await matter.refreshNode(stored.id);
-        node = refreshed.node;
-        liveRead = refreshed.liveRead;
-      } catch {
-        liveRead = "failed";
-      }
-    }
-    try {
-      const jobs = await firmware.list();
-      const catalogue = await loadOtaCatalogue(jobs, paths.profile);
-      const identity = {
-        vendorId: node.vendorId,
-        productId: node.productId,
-        softwareVersion: node.softwareVersion,
-        softwareVersionString: node.softwareVersionString,
-      };
-      const selection: CompositionSelection = { firmware: "keep", componentIds: "keep", gpio: [] };
-      return {
-        liveRead,
-        node: {
-          id: node.id,
-          name: node.name,
-          matterNodeId: node.matterNodeId,
-          hardwareMac: node.hardwareMac ?? null,
-          hardware: node.hardware,
-          vendorId: node.vendorId,
-          productId: node.productId,
-          softwareVersion: node.softwareVersion,
-          softwareVersionString: node.softwareVersionString,
-          connection: node.connection ?? "unknown",
-          presence: node.presence ?? "unknown",
-          reachable: node.reachable,
-          commissionedFabricCount: node.commissionedFabricCount,
-        },
-        firmware: firmwareOptions(identity, catalogue.releases),
-        components: catalogue.catalogue,
-        plan: planOtaComposition({
-          node: identity,
-          core: catalogue.core,
-          catalogue: catalogue.catalogue,
-          releases: catalogue.releases,
-          selection,
-          limits: boardLimits(paths.profile),
-          buildRunning: jobs.some((job) => job.status === "running"),
-        }),
-      };
-    } catch (error) {
-      if (error instanceof CatalogueError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
-      return reply.code(503).send({ error: { code: "catalogue_unavailable", message: "The firmware catalogue could not be read. No composition was started." } });
-    }
-  });
-  app.post("/api/ota/composition/preview", async (request, reply) => {
-    const parsed = z.object({
-      nodeId: z.string().min(1),
-      firmware: z.string().min(1),
-      componentIds: z.union([z.literal("keep"), z.array(z.string().min(1)).max(8)]),
-      gpio: z.array(z.object({
-        componentId: z.string().min(1),
-        pinName: z.string().min(1),
-        gpio: z.number().int().min(0).max(27),
-      })).max(16).optional(),
-      mode: z.enum(["keep", "add", "replace", "remove"]).optional(),
-      record: z.boolean().optional(),
-    }).safeParse(request.body ?? {});
-    if (!parsed.success) {
-      return reply.code(400).send({ error: { code: "invalid_composition", message: "Choose a node, a firmware baseline, and catalogue components. Preview does not compile or announce an update." } });
-    }
-    if (parsed.data.componentIds !== "keep") {
-      return reply.code(409).send({ error: { code: "functionality_change", message: "OTA does not change sensors or actuators. Use Setup or Firmware Builder for a wired composition. No image was compiled or announced." } });
-    }
-    const node = await nodes.getById(parsed.data.nodeId);
-    if (!node) return reply.code(404).send({ error: { code: "not_found", message: "Node not found." } });
-    try {
-      const jobs = await firmware.list();
-      const catalogue = await loadOtaCatalogue(jobs, paths.profile);
-      const plan = planOtaComposition({
-        node: {
-          vendorId: node.vendorId,
-          productId: node.productId,
-          softwareVersion: node.softwareVersion,
-          softwareVersionString: node.softwareVersionString,
-        },
-        core: catalogue.core,
-        catalogue: catalogue.catalogue,
-        releases: catalogue.releases,
-        selection: {
-          firmware: parsed.data.firmware === "keep" ? "keep" : parsed.data.firmware,
-          componentIds: parsed.data.componentIds,
-          gpio: parsed.data.gpio ?? [],
-          mode: parsed.data.mode,
-        },
-        limits: boardLimits(paths.profile),
-        buildRunning: jobs.some((job) => job.status === "running"),
-      });
-      const saved = parsed.data.record === true
-        ? await saveOtaCompositionPlan({
-          nodeId: node.id,
-          matterNodeId: node.matterNodeId,
-          currentSoftwareVersion: node.softwareVersion,
-          currentProductId: node.productId,
-          plan,
-        })
-        : null;
-      return { plan, planId: saved?.planId ?? null, compiled: false, announced: false };
-    } catch (error) {
-      if (error instanceof CatalogueError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
-      return reply.code(503).send({ error: { code: "catalogue_unavailable", message: "The composition could not be checked. No build and no OTA announcement were started." } });
-    }
-  });
-  app.post("/api/ota/composition/prepare", async (request, reply) => {
-    const parsed = z.object({
-      nodeId: z.string().min(1),
-      firmware: z.string().min(1),
-      componentIds: z.union([z.literal("keep"), z.array(z.string().min(1)).max(8)]),
-      gpio: z.array(z.object({
-        componentId: z.string().min(1),
-        pinName: z.string().min(1),
-        gpio: z.number().int().min(0).max(27),
-      })).max(16).optional(),
-      mode: z.enum(["keep", "add", "replace", "remove"]).optional(),
-      softwareVersion: z.number().int().min(1).max(65535),
-      confirm: z.literal(true),
-    }).safeParse(request.body ?? {});
-    if (!parsed.success) {
-      return reply.code(400).send({ error: { code: "invalid_composition", message: "Prepare firmware needs the same selection the planner accepted. Nothing was compiled." } });
-    }
-    if (parsed.data.componentIds !== "keep") {
-      return reply.code(409).send({ error: { code: "functionality_change", message: "OTA does not change sensors or actuators. Use Setup or Firmware Builder for a wired composition. Nothing was compiled." } });
-    }
-    const node = await nodes.getById(parsed.data.nodeId);
-    if (!node) return reply.code(404).send({ error: { code: "not_found", message: "Node not found." } });
-    try {
-      const jobs = await firmware.list();
-      const catalogue = await loadOtaCatalogue(jobs, paths.profile);
-      const plan = planOtaComposition({
-        node: {
-          vendorId: node.vendorId,
-          productId: node.productId,
-          softwareVersion: node.softwareVersion,
-          softwareVersionString: node.softwareVersionString,
-        },
-        core: catalogue.core,
-        catalogue: catalogue.catalogue,
-        releases: catalogue.releases,
-        selection: {
-          firmware: parsed.data.firmware === "keep" ? "keep" : parsed.data.firmware,
-          componentIds: parsed.data.componentIds,
-          gpio: parsed.data.gpio ?? [],
-          mode: parsed.data.mode,
-        },
-        limits: boardLimits(paths.profile),
-        buildRunning: jobs.some((job) => job.status === "running"),
-      });
-      if (plan.action !== "compile" || !plan.prepare || plan.prepare.softwareVersion !== parsed.data.softwareVersion) {
-        return reply.code(409).send({
-          plan,
-          compiled: false,
-          announced: false,
-          error: { code: "composition_not_ready", message: plan.blockers[0]?.message ?? "This composition is not ready to compile. No image was produced." },
-        });
-      }
-      const result = plan.prepare.kind === "retained"
-        ? await startRetainedComposition(firmware, {
-          repoRoot: paths.repoRoot,
-          dataDir: paths.dataDir,
-          vendorId: plan.prepare.targetVendorId,
-          productId: plan.prepare.targetProductId,
-          components: plan.prepare.components.map((component) => ({
-            id: component.id,
-            pins: component.pins,
-            reserveEndpointIds: component.reserveEndpointIds,
-          })),
-          retiredEndpointIds: plan.prepare.retiredEndpointIds,
-          intent: "new-release",
-          softwareVersion: plan.prepare.softwareVersion,
-        })
-        : plan.prepare.nodeType === "environmental-dht11"
-          ? await startDht11Composition(firmware, {
-            repoRoot: paths.repoRoot,
-            dataDir: paths.dataDir,
-            gpio: plan.prepare.gpio ?? 4,
-            intent: "new-release",
-            softwareVersion: plan.prepare.softwareVersion,
-          })
-          : await startNodeTypeComposition(firmware, {
-            nodeTypeId: plan.prepare.nodeType ?? "rgb-led",
-            repoRoot: paths.repoRoot,
-            dataDir: paths.dataDir,
-            intent: "new-release",
-            softwareVersion: plan.prepare.softwareVersion,
-          });
-      if (!result.reused && result.job.status === "failed") {
-        const issue = result.job.validation.issues.find((item) => item.level === "error");
-        return reply.code(issue?.code === "toolchain_not_configured" ? 503 : 409).send({
-          job: result.job,
-          reused: false,
-          announced: false,
-          error: { code: issue?.code ?? "composition_rejected", message: issue?.message ?? result.job.logs.at(-1) ?? "Composition did not start." },
-        });
-      }
-      return reply.code(result.reused ? 200 : 202).send({ job: result.job, reused: result.reused, announced: false });
-    } catch (error) {
-      if (error instanceof CatalogueError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
-      return reply.code(503).send({ error: { code: "catalogue_unavailable", message: "The firmware catalogue is unavailable. Compilation did not start." } });
-    }
-  });
-  app.get("/api/ota/provider", async () => matter.getOtaProviderStatus());
-  app.get("/api/nodes/:id/ota-requestor", async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const node = await nodes.getById(id);
-    if (!node?.matterNodeId) return reply.code(404).send({ error: { code: "not_found", message: "That node is not on the management fabric." } });
-    if (!matter.readOtaRequestor) return reply.code(409).send({ error: { code: "not_available", message: "This controller cannot read the OTA Requestor. No update was announced." } });
-    return matter.readOtaRequestor(node.matterNodeId);
-  });
-  app.post("/api/ota/preflight", async (request) => ota.preflight(otaRequestSchema.parse(request.body)));
-  app.post("/api/ota/jobs", async (request, reply) => {
-    const body = otaRequestSchema.parse(request.body);
-    const job = await ota.deploy(body);
-    await appendAudit(auditFile, { action: "ota", id: job.id, status: job.status, nodeId: body.nodeId });
-    return reply.code(job.status === "blocked" || job.status === "failed" ? 409 : 201).send({ job });
-  });
-  app.post("/api/ota/jobs/:id/verify", async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const job = await ota.verify(id);
-    if (!job) return reply.code(404).send({ error: { code: "not_found", message: "OTA job not found" } });
-    return { job, announced: false };
-  });
-  app.get("/api/ota/jobs/:id", async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const job = await ota.get(id);
-    if (!job) return reply.code(404).send({ error: { code: "not_found", message: "OTA job not found" } });
-    return { job };
-  });
-  app.get("/api/ota/jobs", async () => ({ jobs: await otas.list() }));
-
   app.post("/api/ai/draft", async (request, reply) => {
     aiDraftRequestSchema.parse(request.body);
     return reply.code(503).send({
@@ -1104,14 +868,7 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
 
   app.post("/api/controller/peers/retire", async (request) => {
     const body = retirePeerRequestSchema.parse(request.body);
-    const result = await matter.retireUnsavedPeer(body);
-    await appendAudit(auditFile, {
-      action: "retire_unsaved_peer",
-      matterNodeId: result.matterNodeId,
-      localPeerRemoved: result.localPeerRemoved,
-      physicalFabricRemoved: false,
-    });
-    return result;
+    return matter.retireUnsavedPeer(body);
   });
   app.get("/api/controller/status", async () => matter.getControllerStatus());
   app.post("/api/controller/identity", async (request) => {
@@ -1119,9 +876,7 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
     if (body?.confirm !== true) {
       return { ...(await matter.getControllerStatus()), message: "Creating a controller identity requires confirmation." };
     }
-    const status = await matter.createIdentity();
-    await appendAudit(auditFile, { action: "controller_identity", loaded: status.identityLoaded, persisted: status.persisted });
-    return status;
+    return matter.createIdentity();
   });
 
   app.get("/api/settings", async () => {
@@ -1159,8 +914,7 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
       connection: "keep-alive",
     });
     const buildsNow = await firmware.list();
-    const otasNow = await otas.list();
-    reply.raw.write(`data: ${JSON.stringify({ builds: buildsNow, otaJobs: otasNow })}\n\n`);
+    reply.raw.write(`data: ${JSON.stringify({ builds: buildsNow })}\n\n`);
     reply.raw.end();
   });
 
@@ -1181,6 +935,6 @@ export async function buildApp(paths: AppPaths): Promise<FastifyInstance> {
 }
 
 export async function readBoardProfile(repoRoot: string): Promise<BoardProfile> {
-  const raw = JSON.parse(await readFile(path.join(repoRoot, "board-profiles/esp32h2.json"), "utf8")) as BoardProfile;
+  const raw = JSON.parse(await readFile(boardProfileFile(repoRoot), "utf8")) as BoardProfile;
   return raw;
 }

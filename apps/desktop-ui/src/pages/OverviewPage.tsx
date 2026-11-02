@@ -18,6 +18,11 @@ export function connectionLabel(node: ManagedNode): string {
   return presenceLabel(node);
 }
 
+function overviewAlert(messages: string[]): string | null {
+  const shown = messages.filter((message) => !message.startsWith("Could not reconnect to the stored Matter device."));
+  return shown.length > 0 ? shown.join(" ") : null;
+}
+
 const PRODUCT_SENSOR: Record<number, string> = {
   0x8000: "DHT11 Temperature and Humidity",
   0x8001: "Photosensitive Light Sensor",
@@ -109,7 +114,7 @@ export function OverviewPage() {
       const body = await api<ReachabilityReport>("/api/nodes/refresh-live", { method: "POST" });
       setNodes(body.nodes);
       setRefreshedAt(body.checkedAt);
-      if (body.errors.length > 0) setError(body.errors.map((item) => item.message).join(" "));
+      setError(overviewAlert(body.errors.map((item) => item.message)));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Refresh failed");
     } finally {
@@ -125,7 +130,7 @@ export function OverviewPage() {
       const body = await api<{ node: ManagedNode; message: string; liveRead: string }>(`/api/nodes/${id}/refresh`, { method: "POST" });
       setNodes((current) => current.map((node) => node.id === id ? body.node : node));
       setRefreshedAt(new Date().toISOString());
-      if (body.liveRead !== "read") setError(body.message);
+      if (body.liveRead !== "read") setError(overviewAlert([body.message]));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Refresh failed");
     } finally {
@@ -218,7 +223,6 @@ export function OverviewPage() {
               <div><dt>Setup status</dt><dd>{stateLabel(view.management)}</dd></div>
             </dl>
             <div className="actions">
-              <Link className="button secondary" to={`/ota?node=${selected.id}`}>OTA Updating</Link>
               <Link className="button" to={`/setup?node=${selected.id}&mode=reflash`}>Re-flash Firmware</Link>
             </div>
           </div>

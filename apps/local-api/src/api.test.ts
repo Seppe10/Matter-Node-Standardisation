@@ -1,15 +1,16 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { compiledTestOnboarding, onboardingDecision, type BuildJob, type FirmwareBuildRequest, type MatterManagementService, type ProgramSession } from "@iotedu/contracts";
+import { componentManifestDir } from "@iotedu/contracts/paths";
 import type { NativeBuildResult, NativeBuildSpec } from "@iotedu/firmware-builder/native";
 import type { UsbRunnerResult, UsbRunnerSpec } from "@iotedu/firmware-builder/programmer";
 import { afterEach, describe, expect, it } from "vitest";
 import { MatterOperationError } from "@iotedu/matter-controller";
 import { buildApp, readBoardProfile } from "./app.js";
-import type { AppReset, MonitorRunner, OccupantLookup, PortLister, UsbRunner } from "./programmer-service.js";
+import type { AppReset, MonitorRunner, OccupantLookup, PortClassifier, PortLister, UsbRunner } from "./programmer-service.js";
 import type { NativeRunner } from "./services.js";
 import { JsonNodeRepository } from "./store.js";
 
@@ -22,6 +23,7 @@ async function createApp(options: {
   runProgram?: UsbRunner;
   runMonitor?: MonitorRunner;
   listPorts?: PortLister;
+  classifyPorts?: PortClassifier;
   appReset?: AppReset;
   occupants?: OccupantLookup;
   matter?: MatterManagementService;
@@ -32,15 +34,16 @@ async function createApp(options: {
   const app = await buildApp({
     dataDir,
     repoRoot,
-    catalogDir: path.join(repoRoot, "catalog/manifests"),
+    catalogDir: componentManifestDir(repoRoot),
     profile,
     nativeAvailable: options.nativeAvailable ?? false,
     runNative: options.runNative,
     runProgram: options.runProgram,
     runMonitor: options.runMonitor,
     listPorts: options.listPorts,
+    classifyPorts: options.classifyPorts ?? (async (ports) => ports.map((port) => ({ path: port, role: "unknown" as const, label: "USB serial" }))),
     appReset: options.appReset,
-    occupants: options.occupants,
+    occupants: options.occupants ?? (async () => []),
     matter: options.matter,
     reachabilityIntervalMs: options.reachabilityIntervalMs,
   });
@@ -207,9 +210,8 @@ describe("local API", () => {
     const reopened = new JsonNodeRepository(path.join(dataDir, "nodes.json"));
     const stored = await reopened.getById(body.node.id);
     expect(stored?.name).toBe("Lab sensor");
-
-    const audit = await readFile(path.join(dataDir, "audit.jsonl"), "utf8");
-    expect(audit).not.toContain("3497-011-2332");
+    expect(created.body).not.toContain("3497-011-2332");
+    await expect(readFile(path.join(dataDir, "audit.jsonl"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("streams a simulated commission without echoing the pairing code", async () => {
@@ -231,9 +233,7 @@ describe("local API", () => {
     expect(String(created.headers["content-type"])).toContain("application/x-ndjson");
     expect(created.body).toContain('"type":"result"');
     expect(created.body).not.toContain("3497");
-    const audit = await readFile(path.join(dataDir, "audit.jsonl"), "utf8");
-    expect(audit).not.toContain("3497-011-2332");
-    expect(audit).toContain("redacted");
+    await expect(readFile(path.join(dataDir, "audit.jsonl"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("searches the catalogue and refuses a planned driver in a native build", async () => {
@@ -254,7 +254,7 @@ describe("local API", () => {
     expect(job.logs.join("\n")).toMatch(/planned|not available/i);
   });
 
-  it("labels a mock package as simulated and blocks OTA", async () => {
+  it("labels a mock package as simulated", async () => {
     const { app } = await createApp();
     closers.push(app);
     const commissioned = await app.inject({
@@ -271,52 +271,6 @@ describe("local API", () => {
     expect(job.status).toBe("simulated");
     expect(job.artifacts[0].deployable).toBe(false);
     expect(job.logs.join("\n")).toMatch(/ESP-IDF was not invoked/);
-
-    const preflight = await app.inject({
-      method: "POST",
-      url: "/api/ota/preflight",
-      payload: {
-        nodeId,
-        buildId: job.id,
-        artifactName: "SIMULATED.txt",
-        userApproved: true,
-        confirm: true,
-      },
-    });
-    const result = preflight.json();
-    expect(result.allowed).toBe(false);
-    expect(result.checks.find((check: { id: string }) => check.id === "ota_requestor").status).toBe("unknown");
-    expect(result.checks.find((check: { id: string }) => check.id === "artifact_real").status).toBe("failed");
-
-    const deployed = await app.inject({
-      method: "POST",
-      url: "/api/ota/jobs",
-      payload: {
-        nodeId,
-        buildId: job.id,
-        artifactName: "SIMULATED.txt",
-        userApproved: true,
-        confirm: true,
-        nodeIds: [nodeId, "other"],
-      },
-    });
-    expect(deployed.statusCode).toBe(400);
-
-    const single = await app.inject({
-      method: "POST",
-      url: "/api/ota/jobs",
-      payload: {
-        nodeId,
-        buildId: job.id,
-        artifactName: "SIMULATED.txt",
-        userApproved: true,
-        confirm: true,
-      },
-    });
-    expect(single.statusCode).toBe(409);
-    expect(single.json().job.status).toBe("blocked");
-    expect(single.json().job.installedVersionConfirmed).toBe(false);
-    expect(single.json().job.stages.every((stage: { state: string }) => stage.state === "not_observed")).toBe(true);
 
     const refreshed = await app.inject({ method: "POST", url: `/api/nodes/${nodeId}/refresh` });
     expect(refreshed.json().liveRead).toBe("unavailable");
@@ -385,10 +339,7 @@ describe("local API", () => {
       removeNode: () => Promise.reject(new Error("unused")),
       retireUnsavedPeer: () => Promise.reject(new Error("unused")),
       openCommissioningWindow: () => Promise.resolve({ opened: false, message: "unused" }),
-      getOtaProviderStatus: () => Promise.resolve({ running: false, endpointNumber: null, fabricScoped: false, ledgerOffline: true }),
-      beginOta: () => Promise.reject(new Error("unused")),
       readInstalledSoftwareVersion: () => Promise.resolve(null),
-      subscribeOta: () => () => undefined,
     };
     const { app } = await createApp({ dataDir, matter, reachabilityIntervalMs: 0 });
     closers.push(app);
@@ -638,10 +589,7 @@ describe("local API", () => {
         manualPairingCode: "3497-011-2332",
         qrPairingCode: "MT:Y.ABCDEF",
       }),
-      getOtaProviderStatus: () => Promise.resolve({ running: false, endpointNumber: null, fabricScoped: false, ledgerOffline: true }),
-      beginOta: () => Promise.reject(new Error("unused")),
       readInstalledSoftwareVersion: () => Promise.resolve(null),
-      subscribeOta: () => () => undefined,
     };
     const { app } = await createApp({ dataDir, matter });
     closers.push(app);
@@ -713,7 +661,7 @@ describe("local API", () => {
     const server = await readFile(path.join(repoRoot, "apps/local-api/package.json"), "utf8");
     expect(server).not.toMatch(/prisma|typeorm|octokit|@octokit/i);
     expect(server).toMatch(/"pg"/);
-    const manifestNames = await readdir(path.join(repoRoot, "catalog/manifests"));
+    const manifestNames = await readdir(componentManifestDir(repoRoot));
     expect(manifestNames.length).toBeGreaterThan(0);
   });
 
@@ -883,6 +831,13 @@ describe("local API", () => {
     const stored = await reopened.inject({ method: "GET", url: `/api/programmer/sessions/${session.id}` });
     expect(stored.json().session.status).toBe("succeeded");
     expect(stored.json().session.hardwareVerified).toBe(false);
+    expect(stored.json().session.flashImages).toEqual([
+      { label: "bootloader.bin", offset: 0, bytes: expect.any(Number), hashVerified: true, seconds: null },
+      { label: "partition-table.bin", offset: 0xc000, bytes: expect.any(Number), hashVerified: true, seconds: null },
+      { label: "ota_data_initial.bin", offset: 0x1d000, bytes: expect.any(Number), hashVerified: true, seconds: null },
+      { label: "sensors.bin", offset: 0x20000, bytes: expect.any(Number), hashVerified: true, seconds: null },
+    ]);
+    await expect(access(path.join(dataDir, "programmer"))).rejects.toThrow();
   });
 
   it("records a failed write and a disconnect without marking the package hardware-verified", async () => {
@@ -910,6 +865,8 @@ describe("local API", () => {
     const failed = await waitForProgram(app, started.json().session.id, (item) => item.status !== "running");
     expect(failed.status).toBe("failed");
     expect(failed.hardwareVerified).toBe(false);
+    expect((failed.flashImages ?? []).every((image) => image.hashVerified === false)).toBe(true);
+    expect((failed.flashImages ?? []).map((image) => image.offset)).toEqual([0, 0xc000, 0x1d000, 0x20000]);
     expect(failed.checks.every((item) => item.status !== "passed" || item.id === "connect")).toBe(true);
     expect(createHash("sha256").update(await readFile(path.join(seeded.dir, "sensors.bin"))).digest("hex")).toBe(seeded.hash);
 
@@ -1000,6 +957,13 @@ describe("local API", () => {
     expect(log.body).toContain("1.2.0");
     expect(log.body).not.toContain("12345678");
     expect(log.body).not.toContain("MT:Y");
+    const listed = await monitorApp.inject({ method: "GET", url: `/api/programmer/sessions/${id}` });
+    expect(listed.body).not.toContain("savedSerialLog");
+    const progress = await monitorApp.inject({ method: "GET", url: `/api/programmer/sessions/${id}/log` });
+    expect(progress.statusCode).toBe(200);
+    expect(progress.json().status).toBe("succeeded");
+    expect(progress.json().tail).toContain("cancelled");
+    await expect(access(path.join(dataDir, "programmer"))).rejects.toThrow();
   });
 
   it("captures a console log without erasing flash", async () => {
@@ -1067,7 +1031,7 @@ describe("local API", () => {
     const started = await app.inject({ method: "POST", url: "/api/programmer/sessions", payload: programPayload() });
     const written = await waitForProgram(app, started.json().session.id, (item) => item.status !== "running");
     expect(written.status).toBe("succeeded");
-    expect(written.message).toBe("Unable to verify firmware boot. Flash contents were verified, but no application startup was observed.");
+    expect(written.message).toBe("Flash contents were verified. Application startup has not been captured yet.");
     expect(written.checks.find((item) => item.id === "boot")?.status).toBe("unknown");
     const samePort = await app.inject({
       method: "POST",
@@ -1347,7 +1311,7 @@ describe("local API", () => {
     expect(one.body).not.toContain(onboarding.manualCode);
   });
 
-  it("keeps two ESP32-H2 histories separate and reports only hash-verified write-log images", async () => {
+  it("keeps two ESP32-H2 histories separate and reports recorded flash images", async () => {
     const dataDir = await mkdtemp(path.join(tmpdir(), "iotedu-two-boards-"));
     const base = {
       buildId: "missing-build",
@@ -1378,21 +1342,15 @@ describe("local API", () => {
         monitorLog: "Bluetooth MAC: 48:31:b7:cf:37:5f\nApp version: 1.3.0\nServer Listening...\ncommissioning mode 1\nCHIPoBLE advertising started\nFailed to advertise commissionable node: 3\ndiscriminator: [redacted]",
         createdAt: "2026-10-24T01:48:19.000Z",
         updatedAt: "2026-10-24T01:48:55.000Z",
+        flashImages: [
+          { label: "bootloader.bin", offset: 0, bytes: 21696, hashVerified: true, seconds: 0.2 },
+          { label: "partition-table.bin", offset: 0xc000, bytes: 3072, hashVerified: true, seconds: 0 },
+          { label: "ota_data_initial.bin", offset: 0x1d000, bytes: 8192, hashVerified: true, seconds: 0 },
+          { label: "sensors.bin", offset: 0x20000, bytes: 1592800, hashVerified: true, seconds: 6.8 },
+        ],
       },
     ];
     await writeFile(path.join(dataDir, "programmer-sessions.json"), JSON.stringify(sessions));
-    const logDir = path.join(dataDir, "programmer", "newer-board");
-    await mkdir(logDir, { recursive: true });
-    await writeFile(path.join(logDir, "write.log"), [
-      "Wrote 21696 bytes (1 compressed) at 0x00000000 in 0.2 seconds",
-      "Hash of data verified.",
-      "Wrote 3072 bytes (1 compressed) at 0x0000c000 in 0.0 seconds",
-      "Hash of data verified.",
-      "Wrote 8192 bytes (1 compressed) at 0x0001d000 in 0.0 seconds",
-      "Hash of data verified.",
-      "Wrote 1592800 bytes (1 compressed) at 0x00020000 in 6.8 seconds",
-      "Hash of data verified.",
-    ].join("\n"));
     const { app } = await createApp({ dataDir, nativeAvailable: true, listPorts: async () => ["/dev/cu.usbmodem143401"] });
     closers.push(app);
     const response = await app.inject({ method: "GET", url: "/api/hardware/installations" });

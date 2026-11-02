@@ -1,10 +1,11 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { repositoryPaths } from "../packages/contracts/src/repository-paths.ts";
 import { generateDht11Workspace } from "../packages/firmware-builder/src/workspace.ts";
 
 async function main(): Promise<void> {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const outDir = process.argv[2] ?? path.join(repoRoot, "firmware/out/dht11-node");
+const outDir = process.argv[2] ?? path.join(repositoryPaths(repoRoot).firmwareRoot, "out", "dht11-node");
 const gpio = process.env.IOTEDU_DHT11_PIN ? Number(process.env.IOTEDU_DHT11_PIN) : 4;
 
 const generated = await generateDht11Workspace({

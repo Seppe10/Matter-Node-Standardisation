@@ -23,6 +23,7 @@ export interface ObservedNode {
 export interface SharingWindow {
   manualPairingCode: string;
   qrPairingCode: string;
+  durationSeconds: number;
 }
 
 export interface StoredPeer {
@@ -52,12 +53,5 @@ export interface ManagementTransport {
   reconnect(): Promise<ObservedNode[]>;
   openSharingWindow(matterNodeId: string): Promise<SharingWindow>;
   close(): Promise<void>;
-  otaProviderStatus(): Promise<import("@iotedu/contracts").OtaProviderStatus>;
-  readOtaRequestor?(matterNodeId: string): Promise<import("@iotedu/contracts").OtaRequestorReport>;
   readApplicationModel?(matterNodeId: string): Promise<Array<{ endpointId: number; deviceTypes: number[]; serverClusters: number[] }> | null>;
-  beginOta(input: { matterNodeId: string; image: Uint8Array; vendorId: number; productId: number; softwareVersion: number }): Promise<void>;
-  subscribeOta(listener: (event: import("@iotedu/contracts").OtaProviderEvent) => void): () => void;
-  listStoredImages(): Promise<Array<{ vendorId: number; productId: number; softwareVersion: number; mode: string }>>;
-  storeLocalImage(image: Uint8Array, softwareVersion: number): Promise<void>;
-  exerciseBdxArm(): Promise<{ armed: boolean; cleared: boolean }>;
 }

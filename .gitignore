@@ -11,6 +11,7 @@ backup/
 .env
 .env.local
 data/
+node-data/data/
 flash-backups/
 *.flashbackup
 
@@ -22,6 +23,8 @@ coverage/
 
 # Python
 __pycache__/
+*.pyc
+*.pyo
 .pytest_cache/
 .venv/
 venv/
@@ -33,9 +36,25 @@ venv/
 controller-storage/
 .matter/
 
-# Large generated logs
-docs/baseline-build.log
-docs/modular-build.log
-reference/matter-dht11/managed_components/
-reference/matter-dht11/build/
+# Large generated logs and reference-import inspections
+node-data/firmware/import/
+firmware/template/managed_components/
+firmware/template/build/
+firmware/template/sdkconfig
 firmware/out/
+node-data/firmware/template/managed_components/
+node-data/firmware/template/build/
+node-data/firmware/template/sdkconfig
+node-data/firmware/out/
+
+# Additional Security bolstering
+.env.*
+!.env.example
+Thumbs.db
+desktop.ini
+.idea/
+*.tsbuildinfo
+*.bin
+*.elf
+*.ota
+*.map

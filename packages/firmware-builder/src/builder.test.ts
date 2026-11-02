@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { repositoryPaths } from "@iotedu/contracts/paths";
 import {
   appFitsPartition,
   detectGpioConflicts,
@@ -35,7 +36,7 @@ const profile: BoardProfile = {
 
 describe("firmware checks", () => {
   it("parses the reference partition table and keeps a stable layout id", async () => {
-    const text = await readFile(path.join(repoRoot, "reference/matter-dht11/partitions.csv"), "utf8");
+    const text = await readFile(path.join(repositoryPaths(repoRoot).firmwareTemplateRoot, "partitions.csv"), "utf8");
     const rows = parsePartitionCsv(text);
     const ota0 = rows.find((row) => row.name === "ota_0");
     const ota1 = rows.find((row) => row.name === "ota_1");

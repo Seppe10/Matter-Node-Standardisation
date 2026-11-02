@@ -98,7 +98,6 @@ export function SettingsPage() {
               <tr><th scope="row">Bluetooth</th><td>{caps.bleCommissioning}</td></tr>
               <tr><th scope="row">Thread dataset</th><td>{caps.threadDataset}</td></tr>
               <tr><th scope="row">Firmware build</th><td>{caps.firmwareBuild}</td></tr>
-              <tr><th scope="row">OTA Provider</th><td>{caps.otaProvider}</td></tr>
               <tr><th scope="row">USB flashing</th><td>{caps.usbFlash}</td></tr>
               <tr><th scope="row">AI</th><td>{caps.ai}</td></tr>
               {storage && <tr><th scope="row">Catalogue storage</th><td>{storage}</td></tr>}

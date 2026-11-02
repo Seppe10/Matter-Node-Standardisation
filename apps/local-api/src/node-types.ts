@@ -1,7 +1,5 @@
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import path from "node:path";
 import type { BuildJob } from "@iotedu/contracts";
+import { readFirmwareArtifact } from "./firmware-artifacts.js";
 import {
   CatalogueError,
   catalogueEnabled,
@@ -73,6 +71,10 @@ export interface NodeTypePackage {
   pins: { name: string; gpio: number }[];
   hashVerified: boolean;
   imageSha256: string | null;
+  identityVerified: boolean;
+  deviceRevision: number | null;
+  coreRevision: number | null;
+  endpoints: string[];
 }
 
 export interface NodeTypeView {
@@ -113,12 +115,56 @@ export interface MatchProfile {
   deviceComponentId: string;
   gpioNumbers: number[];
   legacyComponentIds: string[];
+  identity?: {
+    deviceRevision: number;
+    coreRevision: number;
+    endpoints: string[];
+  };
+}
+
+export interface RecordedComponent {
+  id: string;
+  revision: number | null;
+  versionId: string | null;
+  gpio: number | null;
+  endpoints: string[];
+}
+
+export interface FirmwareReleaseMatch {
+  buildId: string;
+  state: string;
+  hardwareTarget?: string;
+  components?: RecordedComponent[];
+}
+
+export function recordedComponents(value: unknown, endpointsFor: (versionId: string) => string[]): RecordedComponent[] {
+  if (!Array.isArray(value)) return [];
+  const parsed: RecordedComponent[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as { id?: unknown; revision?: unknown; versionId?: unknown; gpio?: unknown };
+    if (typeof row.id !== "string" || !row.id) continue;
+    const versionId = typeof row.versionId === "string" && row.versionId ? row.versionId : null;
+    const explicit = typeof row.revision === "number" && Number.isInteger(row.revision) ? row.revision : null;
+    const fromVersion = versionId?.match(/-r(\d+)$/);
+    const revision = explicit ?? (fromVersion ? Number(fromVersion[1]) : null);
+    const resolvedVersion = versionId ?? (revision != null ? `${row.id}-r${revision}` : null);
+    const gpio = typeof row.gpio === "number" && Number.isInteger(row.gpio) ? row.gpio : null;
+    parsed.push({
+      id: row.id,
+      revision,
+      versionId: resolvedVersion,
+      gpio,
+      endpoints: resolvedVersion ? endpointsFor(resolvedVersion) : [],
+    });
+  }
+  return parsed;
 }
 
 export function matchNodeTypePackages(
   profile: MatchProfile,
   packages: PackageCandidate[],
-  releases: Array<{ buildId: string; state: string }>,
+  releases: FirmwareReleaseMatch[],
 ): NodeTypePackage[] {
   const matched: NodeTypePackage[] = [];
   for (const item of packages) {
@@ -126,6 +172,8 @@ export function matchNodeTypePackages(
     const catalogue = cataloguePackage(profile, item);
     if (!catalogue && !legacy) continue;
     if (!installableBinary(item)) continue;
+    const identity = releaseIdentity(profile, item, releases);
+    if (profile.identity && !identity.verified) continue;
     const recorded = releases.find((release) => release.buildId === item.id && (release.state === "published" || release.state === "release_candidate"));
     matched.push({
       buildId: item.id,
@@ -138,9 +186,38 @@ export function matchNodeTypePackages(
       pins: item.pins,
       hashVerified: item.hashMatches,
       imageSha256: item.applicationSha256,
+      identityVerified: profile.identity ? identity.verified : false,
+      deviceRevision: identity.deviceRevision,
+      coreRevision: identity.coreRevision,
+      endpoints: identity.endpoints,
     });
   }
   return matched.sort((left, right) => right.softwareVersion - left.softwareVersion || left.buildId.localeCompare(right.buildId));
+}
+
+function releaseIdentity(
+  profile: MatchProfile,
+  item: PackageCandidate,
+  releases: FirmwareReleaseMatch[],
+): { verified: boolean; deviceRevision: number | null; coreRevision: number | null; endpoints: string[] } {
+  const release = releases.find((candidate) => candidate.buildId === item.id && candidate.state !== "build_failed");
+  const device = release?.components?.find((component) => component.id === profile.deviceComponentId);
+  const core = release?.components?.find((component) => component.id === profile.coreComponentId);
+  const unverified = { verified: false, deviceRevision: device?.revision ?? null, coreRevision: core?.revision ?? null, endpoints: device?.endpoints ?? [] };
+  if (!profile.identity || !release || !device || device.revision !== profile.identity.deviceRevision) return unverified;
+  if (release.hardwareTarget && release.hardwareTarget !== profile.target) return unverified;
+  if (!sameMembers(device.endpoints, profile.identity.endpoints)) return unverified;
+  if (device.gpio != null && (!profile.gpioNumbers.includes(device.gpio) || !item.pins.some((pin) => pin.gpio === device.gpio))) return unverified;
+  if (core && core.revision !== profile.identity.coreRevision) return unverified;
+  if (!core && item.baseFirmwareId !== profile.coreComponentId) return unverified;
+  return { verified: true, deviceRevision: device.revision, coreRevision: core?.revision ?? null, endpoints: device.endpoints };
+}
+
+function sameMembers(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((item, index) => item === sortedRight[index]);
 }
 
 export function nodeTypeReadiness(input: {
@@ -252,7 +329,7 @@ async function ensureNodeTypes(): Promise<void> {
   }
 }
 
-export async function listNodeTypes(jobs: BuildJob[], dataDir: string): Promise<NodeTypeView[]> {
+export async function listNodeTypes(jobs: BuildJob[], dataDir: string, archiveDir = ""): Promise<NodeTypeView[]> {
   await ensureNodeTypes();
   const releases = await listFirmwareReleases().catch((error: unknown) => {
     if (error instanceof CatalogueError) throw error;
@@ -286,13 +363,21 @@ export async function listNodeTypes(jobs: BuildJob[], dataDir: string): Promise<
   const matter = await cataloguePool().query<{ component_version_id: string; endpoint_types: string[] }>(
     "SELECT component_version_id, endpoint_types FROM matter_requirements",
   );
+  const identities = await cataloguePool().query<{ build_id: string; hardware_target: string; component_revisions: unknown }>(
+    "SELECT build_id, hardware_target, component_revisions FROM firmware_releases",
+  ).catch((error: unknown) => {
+    if (error instanceof CatalogueError) throw error;
+    throw new CatalogueError("Firmware release records could not be read.", 503, "catalogue_unavailable");
+  });
+  const endpointsFor = new Map(matter.rows.map((row) => [row.component_version_id, row.endpoint_types ?? []]));
+  const identityByBuild = new Map(identities.rows.map((row) => [row.build_id, row]));
   const grouped = new Map<string, typeof rows.rows>();
   for (const row of rows.rows) {
     const list = grouped.get(row.node_type_id) ?? [];
     list.push(row);
     grouped.set(row.node_type_id, list);
   }
-  const candidates = await Promise.all(jobs.map((job) => candidateFromJob(job, dataDir)));
+  const candidates = await Promise.all(jobs.map((job) => candidateFromJob(job, dataDir, archiveDir)));
   const views: NodeTypeView[] = [];
   for (const group of grouped.values()) {
     const core = group.find((row) => row.role === "matter_core");
@@ -304,9 +389,22 @@ export async function listNodeTypes(jobs: BuildJob[], dataDir: string): Promise<
       target: core.target,
       coreComponentId: core.component_id,
       deviceComponentId: device.component_id,
-      gpioNumbers: pins.map((pin) => pin.default_gpio).filter((gpio): gpio is number => gpio != null),
+      gpioNumbers: pins.map((pin) => pin.default_gpio).filter((gpioNumber): gpioNumber is number => gpioNumber != null),
       legacyComponentIds: core.legacy_component_ids ?? [],
-    }, candidates, releases.map((release) => ({ buildId: release.buildId, state: release.state })));
+      identity: {
+        deviceRevision: Number(device.revision),
+        coreRevision: Number(core.revision),
+        endpoints,
+      },
+    }, candidates, releases.map((release) => {
+      const recorded = identityByBuild.get(release.buildId);
+      return {
+        buildId: release.buildId,
+        state: release.state,
+        hardwareTarget: recorded?.hardware_target ?? release.hardwareTarget,
+        components: recordedComponents(recorded?.component_revisions, (versionId) => endpointsFor.get(versionId) ?? []),
+      };
+    }));
     const readiness = nodeTypeReadiness({ deviceValidationState: device.validation_state, packages });
     views.push({
       id: core.node_type_id,
@@ -339,13 +437,21 @@ export async function listNodeTypes(jobs: BuildJob[], dataDir: string): Promise<
   return views;
 }
 
-async function candidateFromJob(job: BuildJob, dataDir: string): Promise<PackageCandidate> {
+async function candidateFromJob(job: BuildJob, dataDir: string, archiveDir: string): Promise<PackageCandidate> {
   const image = job.artifacts.find((item) => item.name === "sensors.bin" && !item.simulated);
   let hashMatches = false;
   if (image && /^[a-f0-9]{64}$/.test(image.sha256)) {
     try {
-      const bytes = await readFile(path.join(dataDir, image.relativePath));
-      hashMatches = createHash("sha256").update(bytes).digest("hex") === image.sha256;
+      const resolved = await readFirmwareArtifact({
+        dataDir,
+        archiveDir,
+        buildId: job.id,
+        name: image.name,
+        relativePath: image.relativePath,
+        expectedSha256: image.sha256,
+        verify: true,
+      });
+      hashMatches = resolved.sha256 === image.sha256;
     } catch {
       hashMatches = false;
     }

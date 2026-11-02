@@ -4,12 +4,10 @@ import { AccountIcon } from "./components/AccountIcon";
 import { AccountPage } from "./pages/AccountPage";
 import { AiPage } from "./pages/AiPage";
 import { BuilderPage } from "./pages/BuilderPage";
-import { DeploymentPage } from "./pages/DeploymentPage";
 import { HardwarePage } from "./pages/HardwarePage";
 import { NodePage } from "./pages/NodePage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { PairPage } from "./pages/PairPage";
-import { PreflightPage } from "./pages/PreflightPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { SmartHomePage } from "./pages/SmartHomePage";
 
@@ -20,7 +18,6 @@ const links = [
   ["/pair", "Pair New Node"],
   ["/builder", "Firmware Builder"],
   ["/ai", "AI-Assisted Development"],
-  ["/ota", "OTA Updating"],
   ["/settings", "Settings"],
 ] as const;
 
@@ -77,8 +74,6 @@ function Shell() {
               <Route path="/library" element={<Navigate to="/builder?section=components" replace />} />
               <Route path="/builder" element={<BuilderPage />} />
               <Route path="/ai" element={<AiPage />} />
-              <Route path="/ota" element={<PreflightPage />} />
-              <Route path="/ota/jobs/:id" element={<DeploymentPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/account" element={<AccountPage />} />
               <Route path="/login" element={<HomeRedirect />} />

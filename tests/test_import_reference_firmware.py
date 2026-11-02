@@ -10,12 +10,21 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from contextlib import redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from import_reference_firmware import ALLOWLIST, import_archive, plan_import  # noqa: E402
+from import_reference_firmware import (  # noqa: E402
+    ALLOWLIST,
+    default_import_destination,
+    default_import_report,
+    import_archive,
+    main,
+    plan_import,
+    protected_destination_reason,
+)
 
 ARCHIVE = Path(os.environ.get("MATTER_DHT11_ZIP", str(Path.home() / "matter-dht11.zip")))
 EXPECTED_HASHES = {
@@ -76,6 +85,29 @@ class ImportPlannerTests(unittest.TestCase):
 
 
 class ImportExecutionTests(unittest.TestCase):
+    def test_cli_refuses_to_recreate_reference_or_canonical_firmware(self) -> None:
+        entries = {f"matter-dht11/{path}": b"v1" for path in ALLOWLIST}
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_path = Path(tmp) / "ok.zip"
+            archive_path.write_bytes(_zip_bytes(entries))
+            for dest in ("reference/matter-dht11", "node-data/firmware/template", "docs/import"):
+                with self.assertRaises(SystemExit) as raised:
+                    main([str(archive_path), "--dest", str(ROOT / dest), "--dry-run"])
+                self.assertIn("refusing to import", str(raised.exception))
+        self.assertFalse((ROOT / "reference").exists())
+        self.assertFalse((ROOT / "docs").exists())
+
+    def test_cli_default_destination_is_the_import_directory(self) -> None:
+        entries = {f"matter-dht11/{path}": path.encode() for path in ALLOWLIST}
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_path = Path(tmp) / "ok.zip"
+            archive_path.write_bytes(_zip_bytes(entries))
+            report_path = Path(tmp) / "report.json"
+            with redirect_stdout(io.StringIO()):
+                code = main([str(archive_path), "--dest", str(Path(tmp) / "matter-dht11"), "--report", str(report_path)])
+            self.assertEqual(code, 0)
+            self.assertTrue((Path(tmp) / "matter-dht11" / "CMakeLists.txt").is_file())
+        self.assertFalse((ROOT / "reference").exists())
     def test_imports_only_allowlist(self) -> None:
         entries = {f"matter-dht11/{path}": path.encode() for path in ALLOWLIST}
         entries["matter-dht11/build/sensors.bin"] = b"artifact"
@@ -87,8 +119,9 @@ class ImportExecutionTests(unittest.TestCase):
             report = import_archive(archive_path, dest)
             self.assertEqual((dest / "CMakeLists.txt").read_bytes(), b"CMakeLists.txt")
             self.assertFalse((dest / "build" / "sensors.bin").exists())
-            imported = {item["destination_path"].split("matter-dht11/", 1)[-1] for item in report["files"]}
+            imported = {item["destination_path"] for item in report["files"]}
             self.assertEqual(imported, set(ALLOWLIST))
+            self.assertNotIn("reference/", report["destination"])
 
     def test_refuses_overwrite_without_force(self) -> None:
         entries = {f"matter-dht11/{path}": b"v1" for path in ALLOWLIST}
@@ -103,15 +136,51 @@ class ImportExecutionTests(unittest.TestCase):
             self.assertIn("overwrite", str(raised.exception))
 
 
+class TemplateTests(unittest.TestCase):
+    def test_firmware_template_keeps_the_reusable_reference_files(self) -> None:
+        template = ROOT / "node-data" / "firmware" / "template"
+        reusable = {
+            "CMakeLists.txt",
+            "sdkconfig.defaults",
+            "sdkconfig.defaults.esp32h2",
+            "partitions.csv",
+            "dependencies.lock",
+            "main/idf_component.yml",
+        }
+        self.assertFalse((ROOT / "reference" / "matter-dht11").exists())
+        self.assertFalse((ROOT / "reference").exists())
+        self.assertFalse((ROOT / "docs").exists())
+        for name in ("baseline_build.sh", "build_modular_dht11.sh"):
+            script = (ROOT / "scripts" / name).read_text(encoding="utf-8")
+            self.assertNotIn("docs/", script)
+            self.assertNotIn("reference/", script)
+            self.assertIn("node-data/firmware/out/", script)
+        dest = default_import_destination(ROOT)
+        self.assertEqual(dest, ROOT / "node-data" / "firmware" / "import" / "matter-dht11")
+        self.assertEqual(default_import_report(ROOT), ROOT / "node-data" / "firmware" / "import" / "source-import-report.json")
+        self.assertIsNone(protected_destination_reason(ROOT, dest))
+        for blocked in (
+            ROOT / "reference" / "matter-dht11",
+            ROOT / "docs",
+            ROOT / "node-data" / "firmware" / "template",
+            ROOT / "node-data" / "catalogue" / "components" / "dht11",
+            ROOT / "node-data" / "data" / "application",
+        ):
+            self.assertIsNotNone(protected_destination_reason(ROOT, blocked), blocked)
+        for relative in reusable:
+            data = (template / relative).read_bytes()
+            self.assertEqual(hashlib.sha256(data).hexdigest(), EXPECTED_HASHES[relative], relative)
+        header = (ROOT / "node-data" / "firmware" / "components" / "iotedu_core" / "app_openthread_config.h").read_bytes()
+        self.assertEqual(hashlib.sha256(header).hexdigest(), EXPECTED_HASHES["main/app_openthread_config.h"])
+
+
 @unittest.skipUnless(ARCHIVE.is_file(), "matter-dht11.zip not present on this machine")
 class RealArchiveTests(unittest.TestCase):
     def test_real_archive_allowlist_and_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             dest = Path(tmp) / "reference"
             report = import_archive(ARCHIVE, dest)
-            imported = {
-                item["destination_path"].split("matter-dht11/", 1)[-1]: item for item in report["files"]
-            }
+            imported = {item["destination_path"]: item for item in report["files"]}
             self.assertEqual(set(imported), set(ALLOWLIST))
             with zipfile.ZipFile(ARCHIVE) as zf:
                 _, errors = plan_import(zf)
@@ -121,13 +190,6 @@ class RealArchiveTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(data).hexdigest(), item["sha256"])
                 self.assertEqual(item["sha256"], EXPECTED_HASHES[path])
                 self.assertEqual(item["original_path"], f"matter-dht11/{path}")
-
-    def test_checked_in_reference_matches_hashes(self) -> None:
-        root = ROOT / "reference" / "matter-dht11"
-        self.assertTrue(root.is_dir())
-        for relative, digest in EXPECTED_HASHES.items():
-            data = (root / relative).read_bytes()
-            self.assertEqual(hashlib.sha256(data).hexdigest(), digest, relative)
 
 
 if __name__ == "__main__":

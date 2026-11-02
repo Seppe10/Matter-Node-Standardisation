@@ -20,7 +20,6 @@ describe("desktop UI boundaries", () => {
     expect(text).toContain("Add an existing Apple Home device to IoT.Edu");
     expect(text).toContain("APPLE_HOME_STEPS");
     expect(text).toContain("Smart Home Connection");
-    expect(text).toContain("OTA Updating");
     expect(text).toContain("Full Flash Erase");
     expect(text).toContain("Settings");
     const app = await readFile(path.join(src, "App.tsx"), "utf8");
@@ -35,7 +34,6 @@ describe("desktop UI boundaries", () => {
       "Pair New Node",
       "Firmware Builder",
       "AI-Assisted Development",
-      "OTA Updating",
       "Settings",
     ]);
     expect(app).toContain('path="/verify"');
@@ -43,7 +41,7 @@ describe("desktop UI boundaries", () => {
     expect(text).toContain("Selected Node");
     expect(text).toContain("Decommission from IoT.Edu");
     expect(text).toContain("Forget Local Record Only");
-    expect(text).toContain("Validate & Flash Firmware");
+    expect(text).toContain("Write and Flash Firmware");
     expect(text).toContain("Step 1 — Identify Hardware");
     expect(text).toContain("Step 2 — Configure & Install Firmware");
     expect(text).toContain("Step 3 — Connect to Smart Home");

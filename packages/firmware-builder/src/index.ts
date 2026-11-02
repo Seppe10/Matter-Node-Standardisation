@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import type { ComponentManifest, ValidationIssue } from "@iotedu/contracts";
+import { repositoryPaths } from "@iotedu/contracts/paths";
 
 export interface PartitionRow {
   name: string;
@@ -78,7 +79,7 @@ export function partitionLayoutId(input: {
 }
 
 export async function loadReferenceLayout(repoRoot: string, profile: BoardProfile) {
-  const text = await readFile(path.join(repoRoot, "reference/matter-dht11/partitions.csv"), "utf8");
+  const text = await readFile(path.join(repositoryPaths(repoRoot).firmwareTemplateRoot, "partitions.csv"), "utf8");
   const partitions = parsePartitionCsv(text);
   return {
     partitions,

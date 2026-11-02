@@ -214,6 +214,8 @@ export const commissioningWindowResultSchema = z.object({
   message: z.string(),
   manualPairingCode: z.string().optional(),
   qrPairingCode: z.string().optional(),
+  durationSeconds: z.number().int().positive().optional(),
+  openedAt: z.string().optional(),
 });
 export type CommissioningWindowResult = z.infer<typeof commissioningWindowResultSchema>;
 
@@ -474,18 +476,8 @@ export interface MatterManagementService {
   retireUnsavedPeer(input: RetirePeerRequest): Promise<RetirePeerResult>;
   reconciliationPlan(): Promise<ControllerReconciliationPlan>;
   openCommissioningWindow(nodeId: string): Promise<CommissioningWindowResult>;
-  getOtaProviderStatus(): Promise<OtaProviderStatus>;
-  readOtaRequestor?(matterNodeId: string): Promise<OtaRequestorReport>;
-  beginOta(input: { matterNodeId: string; image: Uint8Array; vendorId: number; productId: number; softwareVersion: number }): Promise<void>;
   readInstalledSoftwareVersion(matterNodeId: string): Promise<number | null>;
   readApplicationModel?(matterNodeId: string): Promise<Array<{ endpointId: number; deviceTypes: number[]; serverClusters: number[] }> | null>;
-  subscribeOta(listener: (event: OtaProviderEvent) => void): () => void;
-}
-
-export interface OtaDeploymentService {
-  preflight(input: OtaRequest): Promise<PreflightResult>;
-  deploy(input: OtaRequest): Promise<OtaJob>;
-  get(id: string): Promise<OtaJob | null>;
 }
 
 export const programIntentSchema = z.enum(["initial_install", "reflash", "commissioned_maintenance"]);
@@ -551,6 +543,7 @@ export const programSessionSchema = z.object({
     hashVerified: z.boolean(),
     seconds: z.number().nullable(),
   })).optional(),
+  savedSerialLog: z.string().optional(),
 });
 export type ProgramSession = z.infer<typeof programSessionSchema>;
 
@@ -716,6 +709,7 @@ export {
   elfSha256Matches,
   firmwareStartupStages,
   readDeviceOnboarding,
+  COMMISSIONED_WITHOUT_ONBOARDING,
   onboardingDecision,
   readElfSha256Prefix,
   smartHomeCommissioningCopy,

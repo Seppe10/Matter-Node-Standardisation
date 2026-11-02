@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { repositoryPaths } from "@iotedu/contracts/paths";
 import { catalogueSourceFingerprint, generateCatalogueWorkspace, generateNodeWorkspace, generateRetainedWorkspace, type CatalogueSourceFile } from "./catalogue-workspace.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -167,7 +168,7 @@ describe("catalogue firmware workspace", () => {
   });
 
   it("keeps the ESP32-H2 RGB PWM settings in the driver source", async () => {
-    const driver = await readFile(path.join(repoRoot, "catalogue/components/rgb_led/rgb_led.cpp"), "utf8");
+    const driver = await readFile(path.join(repositoryPaths(repoRoot).catalogueRoot, "components", "rgb_led", "rgb_led.cpp"), "utf8");
     expect(driver).toContain("LEDC_LOW_SPEED_MODE");
     expect(driver).toContain("LEDC_USE_XTAL_CLK");
     expect(driver).toContain("LEDC_TIMER_8_BIT");

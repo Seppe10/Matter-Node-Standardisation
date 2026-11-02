@@ -129,10 +129,9 @@ export function HardwarePage() {
   const [session, setSession] = useState<ProgramSession | null>(null);
   const [consoleText, setConsoleText] = useState("");
   const [findings, setFindings] = useState<ConsoleFindings | null>(null);
-  const [commissionedAck, setCommissionedAck] = useState(false);
+  const [writeAck, setWriteAck] = useState(false);
   const [resetApproved, setResetApproved] = useState(false);
   const [configName, setConfigName] = useState(() => loadNodeConfig(window.localStorage).name);
-  const [flashModal, setFlashModal] = useState(false);
   const [reconciliation, setReconciliation] = useState<string | null>(null);
   const [logOpen, setLogOpen] = useState(false);
   const [recoveryOpen, setRecoveryOpen] = useState(false);
@@ -392,13 +391,6 @@ export function HardwarePage() {
     }
   }
 
-  async function prepareFlash() {
-    if (!selected || !plan || !installGate.allowed) return;
-    setError(null);
-    setValidation(null);
-    setFlashModal(true);
-  }
-
   async function retryBoot() {
     if (!session || session.status !== "succeeded") return;
     const consolePort = setup.consolePort || setup.programmingPort;
@@ -562,7 +554,7 @@ export function HardwarePage() {
       const body = await api<{ tail: string }>(`/api/programmer/sessions/${session.id}/log`);
       setFullWriteLog(body.tail || "Not Verified");
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "The write log could not be read");
+      setError(reason instanceof Error ? reason.message : "The programming log could not be read");
     }
   }
 
@@ -615,10 +607,10 @@ export function HardwarePage() {
   const visibleChecks = displayedStartupChecks(session?.checks ?? [], session?.monitorLog ?? "");
   const headline = installationHeadline(visibleChecks, session?.status ?? null, session?.message ?? null);
   const step = currentSetupStep({ identified: displayedIdentity !== "unknown", bootVerified: installVerified });
-  const flashDisabled = !installGate.allowed || busy != null || session?.status === "running";
+  const flashDisabled = !writeAck || busy != null || session?.status === "running";
   const installStage = activeInstallStage({
     validating: busy === "validate",
-    confirming: flashModal,
+    confirming: false,
     sessionStatus: session?.status === "interrupted" ? "failed" : session?.status === "running" ? "running" : session?.status === "succeeded" ? "succeeded" : session?.status === "failed" ? "failed" : null,
     sessionStage: busy === "verify-boot" ? "monitoring" : session?.stage ?? null,
     boot: bootPassed ? "passed" : bootCheck?.status === "failed" ? "failed" : session ? "unknown" : null,
@@ -755,7 +747,7 @@ export function HardwarePage() {
 
       <section className="panel stack" id="install-firmware">
         <h2>Step 2 — Configure & Install Firmware <span className={`pill ${stepState(2) === "Completed" ? "passed" : stepState(2) === "Failed" ? "failed" : stepState(2) === "In Progress" ? "running" : "not_tested"}`}>{stepState(2)}</span></h2>
-        {!liveIdentity && <p className="banner">{setup.deviceMac ? "This device is previously identified. Identify the connected board again before writing firmware. A matching USB port is not identification." : "Identify the connected ESP32-H2 before writing firmware."}</p>}
+        {!liveIdentity && !setup.deviceMac && <p className="banner">Identify the connected ESP32-H2 before writing firmware.</p>}
         {nodeTypeError && <p className="banner bad">{nodeTypeError}</p>}
         <label>
           Node Type
@@ -779,7 +771,7 @@ export function HardwarePage() {
         </label>
         {nodeTypes && nodeTypes.length === 0 && !nodeTypeError && <p>The firmware catalogue has no Node Types.</p>}
         {activeType && (
-          <div className="stack">
+          <div className="stack tight">
             <p><strong>{activeType.statusLabel}</strong> · {activeType.category} · {activeType.name}</p>
             <p>{activeType.description}</p>
             <p>{activeType.matterCore.name} revision {activeType.matterCore.revision} and {activeType.device.name} revision {activeType.device.revision}. Matter endpoints are created by the host: {activeType.endpoints.length ? activeType.endpoints.join(", ") : "none recorded"}.</p>
@@ -819,7 +811,6 @@ export function HardwarePage() {
                 <li key={`${pin.name}-${pin.gpio}`}>{pin.name}: GPIO {pin.gpio ?? "unset"}. {pin.description} {pin.source === "compiled-package" ? "This is the wiring in the selected binary." : activeType.packages.length > 0 ? "This is the catalogue default until a package is selected." : "This is the catalogue requirement. No binary has been compiled for it."}</li>
               ))}
             </ul>
-            <p>GPIO 8 is a strapping pin and GPIO 9 remains BOOT. A different physical wiring needs a new firmware build. Changing this page does not rebuild the binary.</p>
           </div>
         )}
         <div>
@@ -831,70 +822,32 @@ export function HardwarePage() {
           </dl>
           {hardwareMismatch && <p className="banner bad">The connected chip is not an ESP32-H2.</p>}
         </div>
-        {selected && (
-          <div className="stack">
-            <h3>Installation review</h3>
-            <p>This review does not write the device. {setupMode === "reflash" ? "A managed device is selected, so this would reboot a board that may already be commissioned." : "No managed device is selected. Flashing does not commission the board to Apple Home or IoT.Edu."}</p>
-            <p>The write uses the package flash manifest. NVS, factory data, and secure-cert partitions stay out of that manifest. OTA boot selection is rewritten only when the manifest includes it. A different partition layout is not treated as safe.</p>
-            <ol>
-              {[
-                ["Device boots", session?.buildId === selected.id && bootPassed],
-                ["Thread network is available", false],
-                ["Device reconnects or commissions", false],
-                ...activeType?.endpoints.map((endpoint) => [`${endpoint.replaceAll("_", " ")} responds`, false] as [string, boolean]) ?? [],
-                ["Apple Home recognises the Matter endpoints", false],
-                ["IoT.Edu operational session", false],
-                [`Basic Information reports SoftwareVersion ${selected.request.softwareVersion}`, false],
-                ["Device remains available for a future OTA", false],
-              ].map(([item, observed]) => (
-                <li key={String(item)}>{item}: {observed ? "Observed" : "Not observed"}</li>
-              ))}
-            </ol>
-          </div>
-        )}
         {olderThanNode && <p className="banner">The selected package is older than the stored Matter SoftwareVersion.</p>}
-        {!installGate.allowed && <p className="banner">{installGate.reason}</p>}
+        {!installGate.allowed && installGate.reason !== "Select a Node Type before installing firmware." && installGate.reason !== "Identify the connected ESP32-H2 before writing firmware." && <p className="banner">{installGate.reason}</p>}
+          <div className="write-action">
+            <label className="choice">
+              <input type="checkbox" checked={writeAck} onChange={(event) => setWriteAck(event.target.checked)} />
+              <span>I understand this reboots the commissioned device and does not remove its Matter fabrics.</span>
+            </label>
+            <button type="button" onClick={() => void flash()} disabled={flashDisabled}>Write and Flash Firmware</button>
+          </div>
           {installStage && (
-            <ol className="steps" aria-label="Installation progress">
-              {INSTALL_STAGES.map((stage) => (
-                <li key={stage} data-state={stage === installStage ? "active" : INSTALL_STAGES.indexOf(stage) < INSTALL_STAGES.indexOf(installStage) ? "done" : "pending"}>
-                  <span className="step-state">{stage === installStage ? "Current" : INSTALL_STAGES.indexOf(stage) < INSTALL_STAGES.indexOf(installStage) ? "Done" : "Waiting"}</span>
-                  {stage}
-                </li>
-              ))}
+            <ol className="steps install-progress" aria-label="Installation progress">
+              {INSTALL_STAGES.map((stage) => {
+                const stageIndex = INSTALL_STAGES.indexOf(stage);
+                const currentIndex = INSTALL_STAGES.indexOf(installStage);
+                const finished = stage === "Complete" && stage === installStage;
+                const state = finished ? "done" : stage === installStage ? "active" : stageIndex < currentIndex ? "done" : "pending";
+                const label = finished ? "Complete" : stage === installStage ? "Current" : stageIndex < currentIndex ? "Done" : "Waiting";
+                return (
+                  <li key={stage} data-state={state}>
+                    <span className="step-state">{label}</span>
+                    {finished ? null : stage}
+                  </li>
+                );
+              })}
             </ol>
           )}
-          <div className="actions">
-            <button type="button" onClick={() => void prepareFlash()} disabled={flashDisabled}>Validate & Flash Firmware</button>
-          </div>
-        {flashModal && (
-          <div className="panel stack" role="dialog" aria-labelledby="flash-confirm-title">
-            <h3 id="flash-confirm-title">Confirm firmware write</h3>
-            <p>{setupMode === "reflash" ? "Re-flash Existing Node" : "First-Time Installation"} on {setup.programmingPort}. Package {selected?.request.softwareVersionString} / SoftwareVersion {selected?.request.softwareVersion}. Writing has not started.</p>
-            {plan && (
-              <table>
-                <caption className="sr-only">Regions that will be written</caption>
-                <thead><tr><th>Offset</th><th>File</th><th>Bytes</th></tr></thead>
-                <tbody>
-                  {plan.regions.map((region) => (
-                    <tr key={region.offset}><td>{region.offset}</td><td>{region.artifact}</td><td>{region.bytes.toLocaleString("en-AU")}</td></tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-            <p>Left unchanged: {plan?.preserved.join(", ") || "NVS and factory data"}. Matter fabric credentials and Thread data remain usable only when this partition table already matches the device. ota_data_initial.bin rewrites the OTA boot selection. Writing does not start until Write firmware is used.</p>
-            {live && (
-              <label className="choice">
-                <input type="checkbox" checked={commissionedAck} onChange={(event) => setCommissionedAck(event.target.checked)} />
-                <span>I understand this reboots the commissioned device and does not remove its Matter fabrics.</span>
-              </label>
-            )}
-            <div className="actions">
-              <button type="button" className="secondary" onClick={() => setFlashModal(false)}>Back</button>
-              <button type="button" disabled={Boolean(live) && !commissionedAck} onClick={() => { setFlashModal(false); void flash(); }}>Write firmware</button>
-            </div>
-          </div>
-        )}
         {headline && <h3>{headline}</h3>}
         {session?.status === "succeeded" && !smartHomeReady && (
           <div className="stack">
@@ -923,7 +876,7 @@ export function HardwarePage() {
             </dl>
             <div className="background-process" aria-hidden="true">
               <table>
-                <caption>Images written, from the firmware write log</caption>
+                <caption>Images recorded for this USB write</caption>
                 <thead><tr><th>Image</th><th>Offset</th><th>Bytes</th><th>Hash</th><th>Time</th></tr></thead>
                 <tbody>
                   {(session.flashImages ?? []).map((image) => (
@@ -932,10 +885,10 @@ export function HardwarePage() {
                       <td>{`0x${image.offset.toString(16)}`}</td>
                       <td>{image.bytes == null ? "Not Verified" : image.bytes.toLocaleString("en-AU")}</td>
                       <td>{image.hashVerified ? "Verified" : "Not Verified"}</td>
-                      <td>{image.seconds == null ? "Not Verified" : `${image.seconds}s`}</td>
+                      <td>{image.seconds == null ? "Not recorded" : `${image.seconds}s`}</td>
                     </tr>
                   ))}
-                  {(session.flashImages ?? []).length === 0 && <tr><td colSpan={5}>Not Verified. The write log has no hash-verified image result.</td></tr>}
+                  {(session.flashImages ?? []).length === 0 && <tr><td colSpan={5}>Not Verified. This session has no recorded flash image.</td></tr>}
                 </tbody>
               </table>
               {missingFlashOffsets(session.flashImages ?? []).length > 0 && <p>Not Verified at {missingFlashOffsets(session.flashImages ?? []).map((offset) => `0x${offset.toString(16)}`).join(", ")}. A missing hash result is not a successful write.</p>}
@@ -972,7 +925,7 @@ export function HardwarePage() {
           {validation && validation.issues.length > 0 && <ul>{validation.issues.map((issue) => <li key={issue.code}>{issue.level}: {issue.message}</li>)}</ul>}
           {selected && <ul>{selected.artifacts.map((item) => <li key={item.name}>{item.name} · {item.size.toLocaleString("en-AU")} bytes</li>)}</ul>}
           <pre className="log" tabIndex={0}>{[session?.logs.join("\n"), session?.monitorLog].filter(Boolean).join("\n") || "No firmware log yet."}</pre>
-          {session && <button type="button" className="secondary" onClick={() => void loadFullWriteLog()}>Show full write log</button>}
+          {session && <button type="button" className="secondary" onClick={() => void loadFullWriteLog()}>Show programming log</button>}
           {fullWriteLog && <pre className="log" tabIndex={0}>{fullWriteLog}</pre>}
         </details>
       </section>

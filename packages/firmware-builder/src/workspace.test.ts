@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { repositoryPaths } from "@iotedu/contracts/paths";
 import { generateDht11Workspace } from "./workspace.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -12,7 +13,7 @@ describe("DHT11 workspace generator", () => {
     const outDir = await mkdtemp(path.join(tmpdir(), "iotedu-fw-"));
     const generated = await generateDht11Workspace({ repoRoot, outDir });
     const partitions = await readFile(path.join(outDir, "partitions.csv"), "utf8");
-    const referencePartitions = await readFile(path.join(repoRoot, "reference/matter-dht11/partitions.csv"), "utf8");
+    const referencePartitions = await readFile(path.join(repositoryPaths(repoRoot).firmwareTemplateRoot, "partitions.csv"), "utf8");
     expect(partitions).toBe(referencePartitions);
     const h2 = await readFile(path.join(outDir, "sdkconfig.defaults.esp32h2"), "utf8");
     expect(h2).toContain('CONFIG_IDF_TARGET="esp32h2"');
@@ -26,20 +27,29 @@ describe("DHT11 workspace generator", () => {
     const app = await readFile(path.join(outDir, "main/app_main.cpp"), "utf8");
     expect(app).toContain("iotedu_dht11_register");
     expect(app).not.toContain("GPIO_NUM_4");
+    const catalogueDriver = await readFile(path.join(repositoryPaths(repoRoot).catalogueRoot, "components", "dht11", "dht11.c"), "utf8");
+    const generatedDriver = await readFile(path.join(outDir, "components/iotedu_dht11/dht11.c"), "utf8");
+    expect(generatedDriver).toBe(catalogueDriver);
+    expect(generatedDriver).toContain("dht11_init_pin");
+    const host = await readFile(path.join(outDir, "main/dht11_matter.cpp"), "utf8");
+    expect(host).toContain("dht11_init_pin(pin)");
+    expect(host).toContain("CONFIG_IOTEDU_DHT11_PIN");
+    const kconfig = await readFile(path.join(outDir, "main/Kconfig.projbuild"), "utf8");
+    expect(kconfig).toContain("config IOTEDU_DHT11_PIN");
+    expect(kconfig).toContain("default 4");
+    const cmake = await readFile(path.join(outDir, "CMakeLists.txt"), "utf8");
+    expect(cmake).toContain("firmware/components");
+    expect(cmake).not.toContain("reference/matter-dht11");
+    expect(cmake).not.toContain("firmware/components/iotedu_dht11");
     const coreHeader = await readFile(
-      path.join(repoRoot, "firmware/components/iotedu_core/app_openthread_config.h"),
+      path.join(repositoryPaths(repoRoot).firmwareComponentsRoot, "iotedu_core", "app_openthread_config.h"),
       "utf8",
     );
-    const referenceHeader = await readFile(
-      path.join(repoRoot, "reference/matter-dht11/main/app_openthread_config.h"),
-      "utf8",
-    );
-    expect(coreHeader).toBe(referenceHeader);
+    expect(coreHeader).toContain("RADIO_MODE_NATIVE");
     expect(generated.partitionLayoutId).toMatch(/^[a-f0-9]{64}$/);
-    const referenceDriver = await readFile(path.join(repoRoot, "reference/matter-dht11/main/drivers/dht11.c"), "utf8");
-    expect(referenceDriver).toContain("GPIO_NUM_4");
+    expect(generatedDriver).toContain("GPIO_NUM_4");
     const manifest = await readFile(path.join(outDir, "main/idf_component.yml"), "utf8");
-    const referenceManifest = await readFile(path.join(repoRoot, "reference/matter-dht11/main/idf_component.yml"), "utf8");
+    const referenceManifest = await readFile(path.join(repositoryPaths(repoRoot).firmwareTemplateRoot, "main", "idf_component.yml"), "utf8");
     expect(manifest).toBe(referenceManifest);
   });
 
@@ -87,7 +97,7 @@ describe("DHT11 workspace generator", () => {
   });
 
   it("refuses to write inside the reference tree", async () => {
-    const outDir = path.join(repoRoot, "reference/matter-dht11/generated-should-not-exist");
-    await expect(generateDht11Workspace({ repoRoot, outDir })).rejects.toThrow(/reference\/matter-dht11/);
+    const outDir = path.join(repositoryPaths(repoRoot).firmwareTemplateRoot, "generated-should-not-exist");
+    await expect(generateDht11Workspace({ repoRoot, outDir })).rejects.toThrow(/firmware\/template/);
   });
 });

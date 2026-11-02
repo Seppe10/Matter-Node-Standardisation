@@ -30,12 +30,15 @@ export async function removeOrphanTemporaryFiles(directory: string): Promise<voi
   await Promise.all(entries.filter((name) => name.endsWith(".tmp")).map((name) => rm(path.join(directory, name), { force: true })));
 }
 
-async function readArray<T>(file: string): Promise<T[]> {
+async function readArray<T>(file: string, tolerant = false): Promise<T[]> {
   try {
-    const parsed = JSON.parse(await readFile(file, "utf8")) as unknown;
+    const text = await readFile(file, "utf8");
+    if (!text.trim()) return [];
+    const parsed = JSON.parse(text) as unknown;
     return Array.isArray(parsed) ? (parsed as T[]) : [];
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    if (tolerant && error instanceof SyntaxError) return [];
     throw error;
   }
 }
@@ -71,10 +74,17 @@ export class JsonNodeRepository implements NodeRepository {
 }
 
 export class JsonJobRepository<T extends { id: string }> {
-  constructor(private readonly file: string) {}
+  constructor(
+    private readonly file: string,
+    private readonly options: {
+      tolerant?: boolean;
+      retain?: (items: T[]) => T[];
+      beforeWrite?: (items: T[]) => Promise<void> | void;
+    } = {},
+  ) {}
 
   async list(): Promise<T[]> {
-    return readArray<T>(this.file);
+    return readArray<T>(this.file, this.options.tolerant === true);
   }
 
   async get(id: string): Promise<T | null> {
@@ -88,7 +98,17 @@ export class JsonJobRepository<T extends { id: string }> {
       const index = jobs.findIndex((item) => item.id === job.id);
       if (index >= 0) jobs[index] = job;
       else jobs.push(job);
-      await atomicWrite(this.file, JSON.stringify(jobs, null, 2) + "\n");
+      if (this.options.beforeWrite) await this.options.beforeWrite(jobs);
+      const next = this.options.retain ? this.options.retain(jobs) : jobs;
+      await atomicWrite(this.file, JSON.stringify(next, null, 2) + "\n");
+    });
+  }
+
+  async replace(items: T[]): Promise<void> {
+    await withFileLock(this.file, async () => {
+      if (this.options.beforeWrite) await this.options.beforeWrite(items);
+      const next = this.options.retain ? this.options.retain(items) : items;
+      await atomicWrite(this.file, JSON.stringify(next, null, 2) + "\n");
     });
   }
 }
@@ -119,14 +139,3 @@ export function redact(text: string, options?: { keepOnboarding?: boolean }): st
   return output.replace(/__IOTEDU_KEEP_(\d+)__/g, (_match, index: string) => preserved[Number(index)] ?? "[redacted]");
 }
 
-export async function appendAudit(file: string, event: Record<string, unknown>): Promise<void> {
-  const line = redact(JSON.stringify({ at: new Date().toISOString(), ...event })) + "\n";
-  await withFileLock(file, async () => {
-    await mkdir(path.dirname(file), { recursive: true });
-    const previous = await readFile(file, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return "";
-      throw error;
-    });
-    await atomicWrite(file, previous + line);
-  });
-}

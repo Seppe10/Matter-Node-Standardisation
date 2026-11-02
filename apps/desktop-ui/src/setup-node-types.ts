@@ -8,6 +8,10 @@ export interface SetupNodePackage {
   hardware: string;
   pins: { name: string; gpio: number }[];
   hashVerified: boolean;
+  identityVerified: boolean;
+  deviceRevision: number | null;
+  coreRevision: number | null;
+  endpoints: string[];
 }
 
 export interface SetupNodeType {
@@ -86,12 +90,28 @@ export function installationAllowed(input: {
   if (input.nodeType.status !== "compiled" || input.nodeType.packages.length === 0) {
     return { allowed: false, reason: input.nodeType.pendingReason ?? "No compiled firmware package is currently available for this Node Type." };
   }
-  if (!input.package) return { allowed: false, reason: "Select a firmware package for this Node Type." };
-  if (!input.package.hashVerified) return { allowed: false, reason: "The firmware package hash does not match the recorded image." };
-  if (input.package.hardware !== "esp32h2" || input.nodeType.target !== "esp32h2") {
+  const firmware = input.package;
+  if (!firmware) return { allowed: false, reason: "Select a firmware package for this Node Type." };
+  if (!firmware.hashVerified) return { allowed: false, reason: "The firmware package hash does not match the recorded image." };
+  if (!firmware.identityVerified || firmware.deviceRevision !== input.nodeType.device.revision) {
+    return { allowed: false, reason: "This package does not match the Node Type component revision." };
+  }
+  if (firmware.coreRevision != null && firmware.coreRevision !== input.nodeType.matterCore.revision) {
+    return { allowed: false, reason: "This package does not match the Matter core revision." };
+  }
+  if (!sameMembers(firmware.endpoints, input.nodeType.endpoints)) {
+    return { allowed: false, reason: "This package does not match the Node Type Matter endpoints." };
+  }
+  if (firmware.hardware !== input.nodeType.target) {
+    return { allowed: false, reason: "This package is not built for this Node Type's board." };
+  }
+  if (!input.nodeType.gpio.every((pin) => pin.gpio == null || firmware.pins.some((item) => item.gpio === pin.gpio))) {
+    return { allowed: false, reason: "This package does not match the Node Type GPIO configuration." };
+  }
+  if (firmware.hardware !== "esp32h2" || input.nodeType.target !== "esp32h2") {
     return { allowed: false, reason: "This package is not built for the ESP32-H2." };
   }
-  if (input.nodeType.gpio.some((pin) => pin.gpio === 8 || pin.gpio === 9) || input.package.pins.some((pin) => pin.gpio === 8 || pin.gpio === 9)) {
+  if (input.nodeType.gpio.some((pin) => pin.gpio === 8 || pin.gpio === 9) || firmware.pins.some((pin) => pin.gpio === 8 || pin.gpio === 9)) {
     return { allowed: false, reason: "GPIO 8 is a strapping pin and GPIO 9 is the BOOT button. This package is not installable." };
   }
   if (!input.identified || !input.chipModel || input.chipModel === "Not Verified") {
@@ -105,6 +125,13 @@ export function installationAllowed(input: {
   }
   if (!input.planReady) return { allowed: false, reason: "The package flash layout has not been validated for this board." };
   return { allowed: true, reason: "The selected package can be reviewed. Writing starts only after confirmation." };
+}
+
+function sameMembers(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((item, index) => item === sortedRight[index]);
 }
 
 export function releaseLabel(state: SetupNodePackage["releaseState"]): string {

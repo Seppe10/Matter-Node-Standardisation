@@ -103,7 +103,8 @@ export function installationHeadline(checks: Array<{ id: string; status: string 
   }
   if (required.some((item) => item === "failed")) return "Firmware Installed — Verification Failed.";
   if (boot === "passed") return "Firmware installation succeeded. Matter commissioning has not yet been performed.";
-  return "Unable to verify firmware boot. Flash contents were verified, but no application startup was observed.";
+  if (message?.startsWith("Unable to verify firmware boot")) return message;
+  return "Flash contents were verified. Application startup has not been captured yet.";
 }
 
 export function bootCaptureReport(monitorLog: string, port: string | null): Array<{ label: string; value: string }> {
@@ -126,7 +127,7 @@ export function bootCaptureReport(monitorLog: string, port: string | null): Arra
     { label: "Characters received", value: received },
     { label: "ROM boot", value: /ESP-ROM:esp32h2/i.test(monitorLog) ? "Captured" : "Not captured" },
     { label: "ESP-IDF startup", value: /2nd stage bootloader|cpu_start:/i.test(monitorLog) ? "Captured" : "Not captured" },
-    { label: "Application startup", value: /cpu_start:|Calling app_main|App version:|App "sensors"|Extended colour light endpoint/i.test(monitorLog) ? "Captured" : "Not captured" },
+    { label: "Application startup", value: /cpu_start:|app_init:|Calling app_main|App version:|App "sensors"|Extended colour light endpoint/i.test(monitorLog) ? "Captured" : "Not captured" },
     { label: "Panic or crash", value: /Guru Meditation|panic'ed|abort\(\)/i.test(monitorLog) ? "Captured" : "Not captured" },
     { label: "Timeout", value: timeout },
   ];

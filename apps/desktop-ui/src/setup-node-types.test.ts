@@ -20,9 +20,23 @@ const dht11Package = {
   hardware: "esp32h2",
   pins: [{ name: "DHT11_DATA", gpio: 4 }],
   hashVerified: true,
+  identityVerified: true,
+  deviceRevision: 2,
+  coreRevision: null,
+  endpoints: ["temperature_sensor", "humidity_sensor"],
 };
 
-const olderPackage = { ...dht11Package, buildId: "older", softwareVersion: 4, softwareVersionString: "1.3.0", releaseState: "legacy" as const, legacy: true };
+const olderPackage = {
+  ...dht11Package,
+  buildId: "older",
+  softwareVersion: 4,
+  softwareVersionString: "1.3.0",
+  releaseState: "legacy" as const,
+  legacy: true,
+  identityVerified: false,
+  deviceRevision: null,
+  endpoints: [],
+};
 
 function type(overrides: Partial<SetupNodeType> = {}): SetupNodeType {
   return {
@@ -82,5 +96,15 @@ describe("setup node types", () => {
     expect(installationAllowed({ ...ready, nodeType: type(), package: dht11Package, flashLabel: "2 MB" }).reason).toMatch(/enough flash/);
     expect(installationAllowed({ ...ready, nodeType: type(), package: { ...dht11Package, hashVerified: false } }).reason).toMatch(/hash/);
     expect(flashBytesFromLabel("4 MB")).toBe(4_194_304);
+  });
+
+  it("installs a verified DHT11 package and refuses a revision, endpoint, board, or GPIO mismatch", () => {
+    expect(installationAllowed({ ...ready, nodeType: type(), package: dht11Package }).allowed).toBe(true);
+    expect(installationAllowed({ ...ready, nodeType: type(), package: { ...dht11Package, identityVerified: false } }).reason).toMatch(/component revision/);
+    expect(installationAllowed({ ...ready, nodeType: type(), package: { ...dht11Package, deviceRevision: 1 } }).reason).toMatch(/component revision/);
+    expect(installationAllowed({ ...ready, nodeType: type(), package: { ...dht11Package, coreRevision: 1 } }).reason).toMatch(/Matter core/);
+    expect(installationAllowed({ ...ready, nodeType: type(), package: { ...dht11Package, endpoints: ["temperature_sensor"] } }).reason).toMatch(/Matter endpoints/);
+    expect(installationAllowed({ ...ready, nodeType: type(), package: { ...dht11Package, hardware: "esp32" } }).reason).toMatch(/board/);
+    expect(installationAllowed({ ...ready, nodeType: type(), package: { ...dht11Package, pins: [{ name: "DHT11_DATA", gpio: 5 }] } }).reason).toMatch(/GPIO/);
   });
 });

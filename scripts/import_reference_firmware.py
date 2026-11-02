@@ -3,6 +3,10 @@
 
 Rejects path traversal, symlinks, files outside the allowlist, duplicate
 destination paths, and overwrites unless --force is supplied.
+
+Generated firmware workspaces read node-data/firmware/template, not this imported tree.
+The default destination is node-data/firmware/import/matter-dht11, an inspection
+directory. It is not the firmware template, the catalogue, or reference/.
 """
 
 from __future__ import annotations
@@ -33,6 +37,50 @@ ALLOWLIST = (
 )
 
 MACOSX_PREFIX = "__MACOSX/"
+
+# These match packages/contracts/src/repository-paths.ts. The importer must not
+# write into canonical firmware, catalogue, or application data.
+PROTECTED_RELATIVE = (
+    "reference",
+    "docs",
+    "node-data/firmware/template",
+    "node-data/firmware/components",
+    "node-data/catalogue",
+    "node-data/board-profiles",
+    "node-data/component-manifests",
+    "node-data/data",
+)
+
+
+def repository_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def default_import_destination(repo_root: Path | None = None) -> Path:
+    root = repo_root or repository_root()
+    return root / "node-data" / "firmware" / "import" / "matter-dht11"
+
+
+def default_import_report(repo_root: Path | None = None) -> Path:
+    root = repo_root or repository_root()
+    return root / "node-data" / "firmware" / "import" / "source-import-report.json"
+
+
+def protected_destination_reason(repo_root: Path, dest: Path) -> str | None:
+    """Refuse canonical source trees and the removed root reference/ and docs/ directories."""
+    root = repo_root.resolve()
+    resolved = dest.resolve()
+    try:
+        relative = resolved.relative_to(root).as_posix()
+    except ValueError:
+        return None
+    for area in PROTECTED_RELATIVE:
+        if relative == area or relative.startswith(f"{area}/"):
+            return (
+                f"refusing to import into {area}; "
+                "use node-data/firmware/import or a directory outside the repository"
+            )
+    return None
 
 
 @dataclass
@@ -175,16 +223,20 @@ def import_archive(
             imported.append(
                 ImportedFile(
                     original_path=_normalise_member(info.filename),
-                    destination_path=str(Path("reference/matter-dht11") / relative),
+                    destination_path=relative,
                     sha256=sha256_bytes(data),
                     size=len(data),
                     crc32=info.CRC,
                 )
             )
 
+    try:
+        reported_destination = dest_root.resolve().relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        reported_destination = dest_root.resolve().as_posix()
     report = {
         "archiveName": zip_path.name,
-        "destination": "reference/matter-dht11",
+        "destination": reported_destination,
         "imported_at": datetime.now(timezone.utc).isoformat(),
         "force": force,
         "dry_run": dry_run,
@@ -194,23 +246,28 @@ def import_archive(
 
 
 def main(argv: list[str] | None = None) -> int:
+    root = repository_root()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archive", type=Path, help="Path to matter-dht11.zip")
     parser.add_argument(
         "--dest",
         type=Path,
-        default=Path("reference/matter-dht11"),
-        help="Destination directory for allowlisted sources",
+        default=default_import_destination(root),
+        help="Inspection directory. Defaults to node-data/firmware/import/matter-dht11",
     )
     parser.add_argument("--force", action="store_true", help="Overwrite existing files")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(
         "--report",
         type=Path,
-        default=Path("docs/source-import-report.json"),
+        default=default_import_report(root),
         help="Write import hashes and original paths as JSON",
     )
     args = parser.parse_args(argv)
+    for label, candidate in (("destination", args.dest), ("report", args.report)):
+        reason = protected_destination_reason(root, candidate)
+        if reason:
+            raise SystemExit(f"{label}: {reason}")
 
     report = import_archive(args.archive, args.dest, force=args.force, dry_run=args.dry_run)
     if not args.dry_run:

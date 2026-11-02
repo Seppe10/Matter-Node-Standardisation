@@ -1,0 +1,28 @@
+{
+  "id": "iotedu-core",
+  "name": "Matter over Thread core",
+  "description": "Reusable ESP32-H2 Matter-over-Thread core. It prepares NVS, the GPIO9 factory-reset button, the Matter node, OpenThread, and the OTA Requestor configuration. Drivers register endpoints before iotedu_core_start.",
+  "type": "core",
+  "version": "1.0.0",
+  "status": "experimental",
+  "source": "local",
+  "target": "esp32h2",
+  "idfCompatibility": ">=5.4.1 <5.5",
+  "selectableForBuild": true,
+  "firmware": {
+    "idfComponentDir": "node-data/firmware/components/iotedu_core",
+    "registerFunction": "iotedu_core_prepare",
+    "requires": [],
+    "kconfig": [],
+    "matter": {
+      "endpoints": ["root"],
+      "clusters": [
+        "BasicInformation",
+        "Descriptor",
+        "OperationalCredentials",
+        "AdministratorCommissioning",
+        "OtaSoftwareUpdateRequestor"
+      ]
+    }
+  }
+}

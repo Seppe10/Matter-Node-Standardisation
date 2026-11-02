@@ -58,7 +58,8 @@ describe("boot verification outcome", () => {
   const passed = ["boot", "matter", "openthread", "dht11", "version"].map((id) => ({ id, status: "passed" }));
 
   it("keeps a missing serial log pending and unlocks smart home only after the startup checks pass", () => {
-    expect(installationHeadline([{ id: "write", status: "passed" }, { id: "boot", status: "unknown" }], "succeeded")).toBe("Unable to verify firmware boot. Flash contents were verified, but no application startup was observed.");
+    expect(installationHeadline([{ id: "write", status: "passed" }, { id: "boot", status: "unknown" }], "succeeded")).toBe("Flash contents were verified. Application startup has not been captured yet.");
+    expect(installationHeadline([{ id: "write", status: "passed" }, { id: "boot", status: "unknown" }], "succeeded", "Unable to verify firmware boot. Flash contents were verified, but no application startup was observed.")).toBe("Unable to verify firmware boot. Flash contents were verified, but no application startup was observed.");
     expect(installationHeadline([{ id: "boot", status: "passed" }, { id: "matter", status: "unknown" }], "succeeded")).toBe("Firmware installation succeeded. Matter commissioning has not yet been performed.");
     expect(installationHeadline([], "interrupted", "Flash verification timed out. The result is unknown. Review the diagnostic log before retrying.")).toMatch(/result is unknown/);
     expect(installationHeadline([{ id: "boot", status: "unknown" }], "succeeded", "The console shows ROM download mode. Application startup was not observed. Flash was not rewritten.")).toMatch(/ROM download mode/);

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import argon2 from "argon2";
 import Fastify, { type FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
+import { componentManifestDir } from "@iotedu/contracts/paths";
 import { buildApp, readBoardProfile } from "./app.js";
 import { attachAuth, authorise, LOGIN_LIMITS, LoginLimiter, type Access } from "./auth-http.js";
 import { hashPassword, hashSessionToken, PASSWORD_HASH, passwordError, verifyPassword } from "./auth-passwords.js";
@@ -78,9 +79,14 @@ describe("authorisation decisions", () => {
     ["POST", "/api/auth/change-password", "user", "ok"],
     ["GET", "/api/nodes", "user", "forbidden"],
     ["GET", "/api/events", "user", "forbidden"],
-    ["POST", "/api/ota", "user", "forbidden"],
+    ["POST", "/api/programmer/sessions", "user", "forbidden"],
     ["PATCH", "/api/users", "user", "forbidden"],
     ["GET", "/api/settings", "user", "forbidden"],
+    ["GET", "/api/hardware/installations", null, "unauthenticated"],
+    ["GET", "/api/hardware/installations", "user", "forbidden"],
+    ["GET", "/api/hardware/installations", "administrator", "ok"],
+    ["POST", "/api/nodes/node-1/commissioning-window", "user", "forbidden"],
+    ["POST", "/api/nodes/node-1/commissioning-window", "administrator", "ok"],
     ["GET", "/api/nodes", "administrator", "ok"],
     ["GET", "/api/events", "administrator", "ok"],
     ["POST", "/api/users", "administrator", "ok"],
@@ -357,7 +363,7 @@ describe("authentication HTTP", () => {
     const app = await buildApp({
       dataDir,
       repoRoot,
-      catalogDir: path.join(repoRoot, "catalog/manifests"),
+      catalogDir: componentManifestDir(repoRoot),
       profile: await readBoardProfile(repoRoot),
       nativeAvailable: false,
       reachabilityIntervalMs: 0,

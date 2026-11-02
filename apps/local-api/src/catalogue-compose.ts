@@ -18,6 +18,7 @@ import {
   saveCompositionRecipe,
   type CatalogueRevision,
 } from "./catalogue-store.js";
+import { FirmwareArtifactError, firmwareArchiveDir, readFirmwareArtifact } from "./firmware-artifacts.js";
 import type { LocalFirmwareBuildService } from "./services.js";
 
 const CORE_ID = "matter-core-iotedu";
@@ -656,20 +657,15 @@ async function record(
   });
 }
 
-async function rememberCompiledPackage(dataDir: string, jobs: BuildJob[], fingerprint: string, gpio: number): Promise<void> {
+async function rememberCompiledPackage(dataDir: string, jobs: BuildJob[], fingerprint: string, gpio: number, archiveDir = firmwareArchiveDir()): Promise<void> {
   const compiled = jobs.filter((job) => job.status === "succeeded" && job.verification === "compiled"
     && job.request.baseFirmwareId === CORE_ID
     && job.request.componentIds.includes(DHT_ID)
     && job.request.pins.some((pin) => pin.pinName === "DHT11_DATA" && pin.gpio === gpio));
   for (const job of compiled) {
-    const image = job.artifacts.find((item) => item.name === "sensors.bin" && !item.simulated && /^[a-f0-9]{64}$/.test(item.sha256));
-    const ota = job.artifacts.find((item) => item.name === "sensors.ota" && !item.simulated && /^[a-f0-9]{64}$/.test(item.sha256));
-    if (!image) continue;
-    const applicationSha256 = await fileSha256(path.join(dataDir, image.relativePath));
-    if (applicationSha256 !== image.sha256) continue;
-    const otaSha256 = ota ? await fileSha256(path.join(dataDir, ota.relativePath)) : null;
-    if (ota && otaSha256 !== ota.sha256) continue;
-    const header = ota ? inspectMatterOtaImage(await readFile(path.join(dataDir, ota.relativePath))) : null;
+    const recalled = await dht11PackageRecall(dataDir, job, archiveDir);
+    if (!recalled) continue;
+    const { applicationSha256, otaSha256, header, image } = recalled;
     const fit = flashPackageFit({
       appBytes: image.size,
       otaSlotBytes: 0x1e0000,
@@ -712,17 +708,39 @@ async function rememberCompiledPackage(dataDir: string, jobs: BuildJob[], finger
   }
 }
 
-async function verifyRecordedImage(dataDir: string, job: BuildJob, applicationSha256: string | null): Promise<void> {
+export async function dht11PackageRecall(dataDir: string, job: BuildJob, archiveDir = firmwareArchiveDir()): Promise<{
+  applicationSha256: string;
+  otaSha256: string | null;
+  header: ReturnType<typeof inspectMatterOtaImage> | null;
+  image: NonNullable<BuildJob["artifacts"][number]>;
+} | null> {
+  const image = job.artifacts.find((item) => item.name === "sensors.bin" && !item.simulated && /^[a-f0-9]{64}$/.test(item.sha256));
+  const ota = job.artifacts.find((item) => item.name === "sensors.ota" && !item.simulated && /^[a-f0-9]{64}$/.test(item.sha256));
+  if (!image) return null;
+  const application = await readPackage(dataDir, job.id, image.name, image.relativePath, archiveDir);
+  if (application.sha256 !== image.sha256) return null;
+  if (!ota) return { applicationSha256: application.sha256, otaSha256: null, header: null, image };
+  const otaFile = await readPackage(dataDir, job.id, ota.name, ota.relativePath, archiveDir);
+  if (otaFile.sha256 !== ota.sha256) return null;
+  return { applicationSha256: application.sha256, otaSha256: otaFile.sha256, header: inspectMatterOtaImage(otaFile.bytes), image };
+}
+
+export async function verifyRecordedImage(dataDir: string, job: BuildJob, applicationSha256: string | null, archiveDir = firmwareArchiveDir()): Promise<void> {
   const image = job.artifacts.find((item) => item.name === "sensors.bin" && !item.simulated);
   if (!image || !applicationSha256) throw new CatalogueError("The recorded application image is missing.", 409, "release_missing");
-  const actual = await fileSha256(path.join(dataDir, image.relativePath));
-  if (actual !== applicationSha256 || actual !== image.sha256) {
+  const actual = await readPackage(dataDir, job.id, image.name, image.relativePath, archiveDir);
+  if (actual.sha256 !== applicationSha256 || actual.sha256 !== image.sha256) {
     throw new CatalogueError("The stored application image does not match its recorded hash.", 409, "artifact_mismatch");
   }
 }
 
-async function fileSha256(file: string): Promise<string> {
-  return createHash("sha256").update(await readFile(file)).digest("hex");
+async function readPackage(dataDir: string, buildId: string, name: string, relativePath: string, archiveDir: string) {
+  try {
+    return await readFirmwareArtifact({ dataDir, archiveDir, buildId, name, relativePath, verify: false });
+  } catch (error) {
+    if (error instanceof FirmwareArtifactError) throw new CatalogueError(error.message, 409, error.code);
+    throw error;
+  }
 }
 
 async function readGitRevision(directory: string): Promise<string> {

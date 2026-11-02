@@ -1,0 +1,28 @@
+{
+  "id": "iotedu-dht11",
+  "name": "DHT11 Driver",
+  "description": "Single-wire DHT11 temperature and humidity driver. The editable source is node-data/catalogue/components/dht11. The Matter host calls dht11_init_pin with CONFIG_IOTEDU_DHT11_PIN. GPIO 4 is the ESP32-H2 assignment. The desktop app does not display those readings.",
+  "type": "sensor",
+  "version": "1.0.0",
+  "status": "experimental",
+  "source": "local",
+  "target": "esp32h2",
+  "idfCompatibility": ">=5.4.1 <5.5",
+  "selectableForBuild": true,
+  "firmware": {
+    "idfComponentDir": "node-data/catalogue/components/dht11",
+    "registerFunction": "iotedu_dht11_register",
+    "requires": [],
+    "kconfig": [
+      {
+        "key": "CONFIG_IOTEDU_DHT11_PIN",
+        "pinName": "DHT11_DATA",
+        "default": 4
+      }
+    ],
+    "matter": {
+      "endpoints": ["temperature_sensor", "humidity_sensor"],
+      "clusters": ["TemperatureMeasurement", "RelativeHumidityMeasurement"]
+    }
+  }
+}

@@ -104,32 +104,10 @@ class FakeTransport implements ManagementTransport {
   }
 
   async openSharingWindow() {
-    return { manualPairingCode: "3497-011-2332", qrPairingCode: "MT:Y.ABCDEF" };
+    return { manualPairingCode: "3497-011-2332", qrPairingCode: "MT:Y.ABCDEF", durationSeconds: 180 };
   }
 
   async close() {}
-
-  async otaProviderStatus() {
-    return { running: false, endpointNumber: null, fabricScoped: false, ledgerOffline: true };
-  }
-
-  async beginOta() {
-    throw new MatterOperationError("connection_failed", "The OTA Provider endpoint is not installed.");
-  }
-
-  subscribeOta() {
-    return () => undefined;
-  }
-
-  async listStoredImages() {
-    return [];
-  }
-
-  async storeLocalImage() {}
-
-  async exerciseBdxArm() {
-    return { armed: false, cleared: true };
-  }
 }
 
 async function service() {
@@ -250,6 +228,28 @@ describe("management controller", () => {
     expect(transport.refreshIds).toEqual(["42", "42"]);
     expect(transport.refreshIds).not.toContain("1");
     expect((await nodes.list())[0]?.matterNodeId).toBe("42");
+  });
+
+  it("opens a sharing window without rewriting the management fabric or storing the code", async () => {
+    const { matter, nodes } = await service();
+    await matter.createIdentity();
+    const result = await matter.commission({
+      path: "smart_home",
+      name: "Bench",
+      pairingCode: "MT:Y.ABCDEF",
+      confirm: true,
+    });
+    const before = JSON.stringify(await nodes.getById(result.node.id));
+    const window = await matter.openCommissioningWindow(result.node.id);
+    expect(window.opened).toBe(true);
+    expect(window.durationSeconds).toBe(180);
+    expect(window.openedAt).toBeTruthy();
+    expect(window.manualPairingCode).toBe("3497-011-2332");
+    const after = await nodes.getById(result.node.id);
+    expect(after?.managementFabricId).toBe("fabric-1");
+    expect(after?.matterNodeId).toBe("42");
+    expect(JSON.stringify(after)).toBe(before);
+    expect(before).not.toContain("3497-011-2332");
   });
 
   it("keeps the last firmware read when a fresh read fails", async () => {

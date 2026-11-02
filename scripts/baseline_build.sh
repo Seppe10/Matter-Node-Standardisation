@@ -5,8 +5,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PROJECT="$ROOT/reference/matter-dht11"
-LOG="$ROOT/docs/baseline-build.log"
+# Generated output matches repositoryPaths().firmwareRoot + "/out".
+PROJECT="${IOTEDU_WORKSPACE:-$ROOT/node-data/firmware/out/baseline}"
+LOG="${IOTEDU_BUILD_LOG:-$ROOT/node-data/firmware/out/baseline-build.log}"
 
 if [[ -z "${IDF_PATH:-}" ]]; then
   echo "IDF_PATH is not set" >&2
@@ -23,8 +24,10 @@ fi
 # shellcheck disable=SC1091
 source "$ROOT/scripts/idf_env.sh"
 
-# Incomplete CMake trees from failed attempts are not valid IDF build dirs.
+# The template is not a build directory. Generate an isolated workspace, then compile that copy.
+npx tsx "$ROOT/scripts/generate_dht11_workspace.ts" "$PROJECT"
 rm -rf "$PROJECT/build"
+mkdir -p "$(dirname "$LOG")"
 
 IDF_PY=(python "$IDF_PATH/tools/idf.py")
 

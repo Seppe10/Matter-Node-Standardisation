@@ -31,4 +31,19 @@ describe("OTA job persistence", () => {
     expect(await readdir(directory)).toEqual(["ota-jobs.json"]);
     expect((await jobs.list())[0]?.message).toBe("event-11");
   });
+
+  it("reads a missing, empty, or corrupt history as an empty list and still saves a new record", async () => {
+    const directory = await mkdtemp(path.join(tmpdir(), "iotedu-sessions-"));
+    const file = path.join(directory, "programmer-sessions.json");
+    const jobs = new JsonJobRepository<{ id: string }>(file, { tolerant: true });
+    expect(await jobs.list()).toEqual([]);
+    await writeFile(file, "");
+    expect(await jobs.list()).toEqual([]);
+    await writeFile(file, "{");
+    expect(await jobs.list()).toEqual([]);
+    await writeFile(file, "{\"not\":\"an array\"}");
+    expect(await jobs.list()).toEqual([]);
+    await jobs.save({ id: "fresh" });
+    expect(await jobs.list()).toEqual([{ id: "fresh" }]);
+  });
 });

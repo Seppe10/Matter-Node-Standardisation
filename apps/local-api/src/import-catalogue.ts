@@ -14,10 +14,10 @@ async function supplied(): Promise<ImportComponent[]> {
   const core: ImportComponent = {
     id: "matter-core-iotedu",
     name: "IoT.Edu Matter-over-Thread core",
-    description: "Shared application core. The working implementation remains firmware/components/iotedu_core in the repository. The three device projects are not stored as separate copies of this core.",
+    description: "Shared application core. The working implementation remains node-data/firmware/components/iotedu_core in the repository. The three device projects are not stored as separate copies of this core.",
     type: "matter_core",
     validationState: "draft",
-    archiveName: "repository firmware/components/iotedu_core",
+    archiveName: "repository node-data/firmware/components/iotedu_core",
     files: [{ path: "project/CMakeLists.txt", role: "config", content: sharedCmake }],
     gpio: [],
     matter: {

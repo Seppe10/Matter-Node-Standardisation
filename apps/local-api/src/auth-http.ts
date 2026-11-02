@@ -233,6 +233,7 @@ export async function resolveAuthStore(paths: { auth?: AuthStore | "off" }): Pro
   try {
     const pool = cataloguePool();
     await ensureAuthSchema(pool);
+    console.log(JSON.stringify({ source: "iotedu-api", event: "authentication", state: "ready" }));
     return new PostgresAuthStore(pool);
   } catch {
     console.error(JSON.stringify({ source: "iotedu-auth", message: "Authentication storage is unavailable." }));

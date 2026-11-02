@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import QRCode from "qrcode";
-import type { HardwareInstallation, ManagedNode } from "@iotedu/contracts";
-import { firmwareStartupStages, onboardingDecision, smartHomeCommissioningCopy } from "@iotedu/contracts";
+import type { CommissioningWindowResult, HardwareInstallation, ManagedNode } from "@iotedu/contracts";
+import { smartHomeCommissioningCopy } from "@iotedu/contracts";
 import { api } from "../api";
 import { formatLocalDateTime } from "../datetime";
+import { MatterCommissioningPanel } from "../MatterCommissioningPanel";
+import type { SharingWindowView } from "../matter-qr";
 import { nodeOptionLabel } from "../selection";
+import { decisionForChoice, deviceIsCommissioned, smartHomeChoices } from "../smart-home-devices";
 import { sameHardwareMac } from "../setup";
 import { historicalDeviceSeed, identityLabel, selectSmartHomeInstallation } from "../setup-flow";
 import { useSetup } from "../use-setup";
@@ -23,10 +25,10 @@ export function SmartHomePage() {
   const [installations, setInstallations] = useState<HardwareInstallation[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [checked, setChecked] = useState<LiveRead | null>(null);
-  const [qrUrl, setQrUrl] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [copyFailed, setCopyFailed] = useState(false);
+  const [chosenMac, setChosenMac] = useState<string | null>(null);
+  const [windows, setWindows] = useState<Record<string, SharingWindowView>>({});
+  const [openingWindow, setOpeningWindow] = useState(false);
   const { view, update } = useSetup(nodes);
   const requestedMac = (params.get("mac") ?? "").toLowerCase();
   const historyView = params.get("history") === "1";
@@ -36,8 +38,11 @@ export function SmartHomePage() {
     urlMac: requestedMac || null,
     history: historyView,
   });
-  const installation = selection.displayed;
-  const associated = nodes.find((node) => installation?.mac && node.hardwareMac && sameHardwareMac(node.hardwareMac, installation.mac)) ?? null;
+  const choices = smartHomeChoices(installations, nodes);
+  const selectedMac = (historyView ? requestedMac : chosenMac ?? view.deviceMac ?? "").toLowerCase();
+  const choice = choices.find((item) => item.mac === selectedMac) ?? null;
+  const installation = choice?.installation ?? null;
+  const associated = choice?.node ?? nodes.find((node) => installation?.mac && node.hardwareMac && sameHardwareMac(node.hardwareMac, installation.mac)) ?? null;
   const needsRecheck = associated?.operationalReverification === "required";
   const live = associated?.matterNodeId && !needsRecheck ? associated : null;
   const current = checked && associated && checked.node.id === associated.id ? checked.node : associated;
@@ -50,13 +55,9 @@ export function SmartHomePage() {
       fabricVendors: installation.fabricVendors,
     })
     : null;
-  const onboarding = installation ? onboardingDecision(installation) : {
-    show: false,
-    payload: null,
-    manualCode: null,
-    reason: selection.mode === "unresolved" ? "Select or Identify Device" : "The onboarding QR is hidden because this page has no verified firmware record for the selected device.",
-    windowWarning: null,
-  };
+  const onboarding = decisionForChoice(choice, !selectedMac || selection.mode === "unresolved");
+  const commissioned = deviceIsCommissioned(choice, installation);
+  const sharingWindow = choice ? windows[choice.mac] ?? null : null;
   const firmwareLabel = installation
     ? `${installation.softwareVersionString}${installation.softwareVersion != null ? ` / SoftwareVersion ${installation.softwareVersion}` : ""}`
     : current?.softwareVersionString
@@ -91,24 +92,6 @@ export function SmartHomePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [installations, view.deviceMac]);
 
-  useEffect(() => {
-    if (!onboarding.show || !onboarding.payload) {
-      setQrUrl(null);
-      return;
-    }
-    let stopped = false;
-    QRCode.toDataURL(onboarding.payload, { margin: 1, width: 220 })
-      .then((url) => {
-        if (!stopped) setQrUrl(url);
-      })
-      .catch(() => {
-        if (!stopped) setQrUrl(null);
-      });
-    return () => {
-      stopped = true;
-    };
-  }, [onboarding.show, onboarding.payload]);
-
   async function checkConnection() {
     if (!live) return;
     setBusy(true);
@@ -121,6 +104,34 @@ export function SmartHomePage() {
       setError(reason instanceof Error ? reason.message : "The management read failed");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function openWindow() {
+    if (!choice?.node?.matterNodeId || choice.node.simulated) return;
+    setOpeningWindow(true);
+    setError(null);
+    try {
+      const body = await api<CommissioningWindowResult>(`/api/nodes/${choice.node.id}/commissioning-window`, { method: "POST" });
+      if (!body.opened || !body.qrPairingCode || !body.manualPairingCode || !body.durationSeconds || !body.openedAt) {
+        setError(body.opened
+          ? "The commissioning window did not include a code and expiry. The code is not shown."
+          : body.message);
+        return;
+      }
+      setWindows((current) => ({
+        ...current,
+        [choice.mac]: {
+          payload: body.qrPairingCode ?? "",
+          manualCode: body.manualPairingCode ?? "",
+          openedAt: body.openedAt ?? "",
+          durationSeconds: body.durationSeconds ?? 0,
+        },
+      }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The commissioning window was not opened");
+    } finally {
+      setOpeningWindow(false);
     }
   }
 
@@ -137,6 +148,21 @@ export function SmartHomePage() {
         </div>
       </header>
       <WorkflowStrip setup={view} />
+      <MatterCommissioningPanel
+        deviceKey={choice?.mac ?? installation?.mac ?? selection.mode}
+        deviceName={choice?.node?.name ?? (installation?.mac ? `ESP32-H2 ${installation.mac}` : selection.mode === "unresolved" ? "No device selected" : current ? nodeOptionLabel(current) : "ESP32-H2")}
+        deviceIdentifier={choice?.mac ?? installation?.mac ?? "Not recorded"}
+        status={commissioning?.headline ?? (commissioned ? "Existing fabric" : "Current state unknown")}
+        windowNow={installation?.windowNow ?? null}
+        decision={onboarding}
+        commissioned={commissioned}
+        sharingWindow={sharingWindow}
+        devices={choices.map((item) => ({ mac: item.mac, label: item.label }))}
+        onSelectDevice={setChosenMac}
+        canOpenWindow={Boolean(choice?.node?.matterNodeId) && !choice?.node?.simulated}
+        openingWindow={openingWindow}
+        onOpenWindow={() => void openWindow()}
+      />
       {selection.mode === "mismatch" && (
         <p className="banner" role="alert">This address names {requestedMac}, a different board from the active device {view.deviceMac}. The page is showing the active device. <Link to={`/smart-home?mac=${encodeURIComponent(requestedMac)}&history=1`}>View {requestedMac} as history</Link>.</p>
       )}
@@ -171,7 +197,7 @@ export function SmartHomePage() {
           <li>Matter server: {installation?.matterStartup === "started" ? "The server was observed." : installation?.matterStartup === "failed" ? "The application stopped before the server." : "Not observed. An OpenThread or chip log is not the server."}</li>
           <li>Thread: {installation?.threadReady ? "OpenThread startup was logged. Joining a network was not observed." : "Not observed."}</li>
           <li>Commissioning-data source: the example provider reads preserved NVS before the compiled development values. CHIP shell is not compiled. The USB port prints the log and does not accept Matter commands.</li>
-          <li>Onboarding payload: {onboarding.show ? "Available for the commissioning path shown below." : "Not shown."}</li>
+          <li>Onboarding payload: {onboarding.show ? "Available in Matter Commissioning when the window is still valid." : "Not shown."}</li>
           <li>Fabric status: {installation?.commissioningState ?? "Unknown"}.</li>
           <li>Commissioning window: {installation?.windowNow ?? "Unknown"}.</li>
           <li>BLE advertising: {installation?.bleAdvertisingObserved ? "CHIPoBLE advertising was logged in this capture." : "Not observed in this capture."}</li>
@@ -200,39 +226,9 @@ export function SmartHomePage() {
 
       <section className="panel stack guide-compact">
         <h2>Begin Apple Home Setup Guide</h2>
-        <p>IoT.Edu does not treat Matter startup as BLE advertising and does not open a commissioning window. Scan a code only when a QR is shown in this section. This page does not launch Apple Home or initiate pairing.</p>
-        {onboarding.show && qrUrl ? <img src={qrUrl} alt={onboarding.reason} width={220} height={220} /> : null}
-        {onboarding.show && onboarding.manualCode && (
-          <p className="pairing-row">
-            <span>Manual pairing code <code>{onboarding.manualCode}</code></span>
-            <span className="pairing-actions">
-            <button type="button" className="secondary" onClick={() => {
-              const code = onboarding.manualCode;
-              if (!code) return;
-              setCopyFailed(false);
-              void navigator.clipboard.writeText(code).then(() => {
-                setCopied(true);
-              }).catch(() => {
-                const area = document.createElement("textarea");
-                area.value = code;
-                area.setAttribute("readonly", "");
-                area.style.position = "fixed";
-                area.style.left = "-9999px";
-                document.body.append(area);
-                area.select();
-                const ok = document.execCommand("copy");
-                area.remove();
-                setCopied(ok);
-                setCopyFailed(!ok);
-              });
-            }}>Copy manual pairing code</button>
-            {copied ? "Copied." : ""}
-            {copyFailed ? "The browser blocked the copy. Select the code above and copy it manually." : ""}
-            </span>
-          </p>
-        )}
+        <p>IoT.Edu does not treat Matter startup as BLE advertising and does not open a commissioning window. Use the Matter Commissioning section above. Scan or enter a code only when that section shows a valid QR code. This page does not launch Apple Home or initiate pairing.</p>
         <ol>
-          <li>On the iPhone, open Home, add an accessory, and scan the code or enter it manually. Do this only when the QR is shown above.</li>
+          <li>On the iPhone, open Home, add an accessory, and scan the code or enter it manually. Do this only when the Matter Commissioning section shows a valid code.</li>
           <li>This application cannot see PASE, attestation, or the Home app. Those stay Not observed unless a later device log shows them.</li>
         </ol>
       </section>
