@@ -69,15 +69,11 @@ cp apps/local-api/.env.example apps/local-api/.env
 Copy-Item apps\local-api\.env.example apps\local-api\.env
 ```
 
-Open `apps/local-api/.env` and set `IOTEDU_FIRMWARE_ARCHIVE` to a folder that exists, for example `~/iotedu-archive` or `C:\iotedu-archive`. You create it in the next step.
-
-Leave `DATABASE_URL` empty. IoT.Edu then runs in **local mode**, with no sign-in. You can [add a database later](#database-optional).
+The defaults work as they are: the firmware archive goes in `iotedu-archive` in your home folder, and with `DATABASE_URL` left empty IoT.Edu runs in **local mode** with no sign-in. You can change either later.
 
 `.env` holds your own settings and secrets. It is ignored by git. Never commit it.
 
 ### 3. Create the local data folder
-
-IoT.Edu will not create its data folder automatically. This is deliberate: it stops the app from silently creating a new Matter identity if your real data folder goes missing. On a first install, create an empty one:
 
 ```bash
 # macOS / Linux
@@ -88,27 +84,30 @@ echo '{"components":[]}' > node-data/data/application/firmware-library/index.jso
 
 ```powershell
 # Windows (PowerShell)
-New-Item -ItemType Directory -Force node-data\data\application\firmware-library, C:\iotedu-archive | Out-Null
+New-Item -ItemType Directory -Force node-data\data\application\firmware-library, "$HOME\iotedu-archive" | Out-Null
 Set-Content node-data\data\application\builds.json '[]' -Encoding ascii
 Set-Content node-data\data\application\firmware-library\index.json '{"components":[]}' -Encoding ascii
 ```
 
 ### 4. Run
 
+**macOS/Linux**
+
 ```bash
 npm run dev
+```
+**Windows:** start the two halves in separate terminals (the single `npm run dev` command doesn't work on Windows yet):
+
+```powershell
+npm run dev -w @iotedu/local-api
+```
+```powershell
+npm run dev -w @iotedu/desktop-ui
 ```
 
 Open **http://127.0.0.1:5173**. The API takes up to about 20 seconds to start, so the first page load may show "Unable to connect" until it is ready. Click **Try again**.
 
 In local mode you go straight to the Overview page, with no sign-in.
-
-On Windows, if `npm run dev` fails, start the two halves in separate terminals:
-
-```powershell
-npm run dev -w @iotedu/local-api
-npm run dev -w @iotedu/desktop-ui
-```
 
 When your firewall asks whether Node may use the network, allow it on **private networks only**. Matter needs this to discover your devices.
 
@@ -173,7 +172,7 @@ Nothing needs to be migrated. Local mode stores nothing that the database replac
    ```bash
    npm run db:setup
    ```
-4. Restart IoT.Edu (`Ctrl+C`, then `npm run dev`). You now see a sign-in page. Choose **Create account**: the first account becomes the **administrator**. After that, self-registration is closed, and an administrator creates further accounts.
+4. Restart IoT.Edu (`Ctrl+C` in its terminal, the restart it with the command from step 4). You now see a sign-in page. Choose **Create account**: the first account becomes the **administrator**. After that, self-registration is closed, and an administrator creates further accounts.
 
 The starter components appear in the Firmware Library as **waiting for validation**. Validating them, and building Node Types from them, needs the [firmware toolchain](#firmware-toolchain-optional-macos-and-linux).
 
@@ -305,7 +304,6 @@ See [`docs/SECURITY.md`](docs/SECURITY.md) for the trust boundaries and how cont
 - **Windows:** firmware building and USB flashing are not available yet. The toolchain scripts need bash, and esp-matter does not support native Windows. COM ports are detected, and the app reports build and flash as unavailable.
 - **Linux:** building and flashing are enabled but have not yet been verified on real hardware. Please open an issue with your results.
 - **Board identification:** detecting which port is an ESP32-H2, as opposed to listing it, currently uses macOS's USB information only.
-- On Windows, the combined `npm run dev` may fail. Start the API and UI separately, as shown above.
 - **Database:** a default local PostgreSQL install is not supported, because IoT.Edu always verifies the server's TLS certificate. Use a hosted PostgreSQL service.
 - **Starter catalogue:** the RGB component's source in the starter catalogue is `rgb_led.cpp`. The original catalogue import used a host-application snapshot, which is not in this repository.
 - `hardwareVerified` remains `false`. The modular DHT11 firmware compiles but has not been fully verified on hardware.
